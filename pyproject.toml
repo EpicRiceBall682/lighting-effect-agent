@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lighting-effect-agent"
+version = "0.1.0"
+description = "Wide-format lighting generation with prompt validation and SDL gamut mapping"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "numpy>=1.26",
+  "Pillow>=10",
+]
+
+[project.optional-dependencies]
+generation = [
+  "accelerate>=1.0",
+  "diffusers==0.39.0",
+  "peft>=0.17",
+  "safetensors>=0.4",
+  "torch>=2.1",
+  "transformers>=4.41.2",
+]
+training = [
+  "openpyxl>=3.1",
+  "pandas>=2.0",
+  "torch>=2.1",
+  "transformers>=4.41.2",
+]
+demo = [
+  "gradio>=6,<7",
+  "openpyxl>=3.1",
+]
+all = [
+  "accelerate>=1.0",
+  "diffusers==0.39.0",
+  "gradio>=6,<7",
+  "openpyxl>=3.1",
+  "pandas>=2.0",
+  "peft>=0.17",
+  "safetensors>=0.4",
+  "torch>=2.1",
+  "transformers>=4.41.2",
+]
+
+[tool.setuptools.packages.find]
+include = ["modules*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

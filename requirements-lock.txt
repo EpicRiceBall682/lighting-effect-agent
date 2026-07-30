@@ -1,0 +1,13 @@
+# Verified local runtime versions on 2026-07-27.
+# Recreate with: python -m pip install -r requirements-lock.txt
+accelerate==1.14.0
+diffusers==0.39.0
+gradio==6.20.0
+numpy==2.5.1
+openpyxl==3.1.5
+pandas==3.0.5
+peft==0.19.1
+Pillow==12.3.0
+safetensors==0.8.0
+torch==2.13.0
+transformers==5.14.1

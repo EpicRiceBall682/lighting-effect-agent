@@ -1,0 +1,600 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import importlib.util
+import json
+from pathlib import Path
+from types import SimpleNamespace
+import tempfile
+import unittest
+import zipfile
+
+import numpy as np
+from PIL import Image
+
+from modules.module_01_prompt_agent.src.schemas import LightingEffectAttributes
+from modules.module_03_image_generation.src.generator import GenerationResult
+from modules.module_04_gamut_mapping.tests.sample_palette import (
+    write_sample_sdl_palette,
+)
+from modules.module_06_demo_evaluation.src.app import build_demo
+from modules.module_06_demo_evaluation.src.evaluator import (
+    BatchEvaluationConfig,
+    load_test_scenes,
+    run_batch_evaluation,
+)
+from modules.module_06_demo_evaluation.src.exporter import (
+    export_submission,
+    load_batch_results,
+)
+from modules.module_06_demo_evaluation.src.pipeline import (
+    LightingDemoPipeline,
+    image_mean_absolute_difference,
+    scene_aware_seed,
+    scene_palette_notice,
+)
+
+
+class FakePromptAgent:
+    def generate(self, scene: str, **kwargs):
+        return LightingEffectAttributes(
+            density="middle",
+            m_intensity=70,
+            k_intensity=55,
+            a_intensity=65,
+            effect=(
+                "Wide panoramic abstract light texture with warm amber at the center, "
+                "pale orange spreading toward both sides, a broad horizontal gradient, "
+                "gentle misty glow, diffused bloom, evenly bright illumination, and a "
+                "welcoming coffee atmosphere."
+            ),
+        )
+
+
+class FakeGenerator:
+    construction_count = 0
+    generation_count = 0
+    generated_seeds: list[int] = []
+
+    def __init__(self, **kwargs):
+        type(self).construction_count += 1
+
+    def generate(self, prompt, *, output_dir, config, source_attributes):
+        type(self).generation_count += 1
+        type(self).generated_seeds.append(config.seed)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        x = np.linspace(0, 1, config.width, dtype=np.float32)
+        array = np.empty((config.height, config.width, 3), dtype=np.uint8)
+        array[:, :, 0] = np.rint(150 + 105 * x)
+        array[:, :, 1] = np.rint(80 + 130 * x)
+        array[:, :, 2] = np.rint(190 - 120 * x)
+        image_path = output_dir / f"raw_light_effect_seed_{config.seed}.png"
+        manifest_path = image_path.with_suffix(".json")
+        Image.fromarray(array, mode="RGB").save(image_path)
+        manifest_path.write_text(
+            json.dumps({"prompt": prompt, "seed": config.seed}) + "\n",
+            encoding="utf-8",
+        )
+        return GenerationResult(
+            image_path=image_path,
+            manifest_path=manifest_path,
+            seed=config.seed,
+            width=config.width,
+            height=config.height,
+        )
+
+
+class SamplePaletteTestCase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._palette_directory = tempfile.TemporaryDirectory()
+        cls.sample_sdl_path = Path(cls._palette_directory.name) / "sample_sdl.txt"
+        write_sample_sdl_palette(cls.sample_sdl_path)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._palette_directory.cleanup()
+
+
+class PipelineTests(SamplePaletteTestCase):
+    def setUp(self):
+        FakeGenerator.construction_count = 0
+        FakeGenerator.generation_count = 0
+        FakeGenerator.generated_seeds = []
+
+    def test_scene_aware_seed_is_stable_but_changes_between_scenes(self):
+        first = scene_aware_seed("蓝天白云大草原", 20260724)
+        repeated = scene_aware_seed("  蓝天白云大草原  ", 20260724)
+        second = scene_aware_seed("沙滩和大海", 20260724)
+        self.assertEqual(first, repeated)
+        self.assertNotEqual(first, second)
+
+    def test_image_difference_is_zero_for_identical_images(self):
+        first = Image.new("RGB", (64, 32), (120, 150, 180))
+        second = Image.new("RGB", (128, 64), (120, 150, 180))
+        self.assertEqual(image_mean_absolute_difference(first, second), 0.0)
+
+    def test_pipeline_writes_complete_artifact_bundle_and_reuses_generator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LightingDemoPipeline(
+                sdl_path=self.sample_sdl_path,
+                output_root=Path(directory),
+                prompt_agent=FakePromptAgent(),
+                generator_factory=FakeGenerator,
+            )
+            result = pipeline.run(
+                "温暖惬意的咖啡厅",
+                1220,
+                370,
+                80,
+                seed=42,
+                steps=10,
+            )
+            second = pipeline.run(
+                "清晨柔和的酒店大堂",
+                1220,
+                370,
+                seed=43,
+                steps=10,
+            )
+
+            self.assertEqual(FakeGenerator.construction_count, 1)
+            self.assertEqual(result.width, 1024)
+            self.assertEqual(result.height % 8, 0)
+            self.assertEqual(result.quality["strict_invalid_pixel_count"], 0)
+            for path in (
+                result.raw_image_path,
+                result.themed_image_path,
+                result.sdl_preview_path,
+                result.sdl_control_path,
+                result.out_of_gamut_mask_path,
+                result.prompt_json_path,
+                result.generation_manifest_path,
+                result.report_path,
+                result.archive_path,
+                second.archive_path,
+            ):
+                self.assertTrue(path.is_file(), path)
+            with zipfile.ZipFile(result.archive_path) as archive:
+                names = set(archive.namelist())
+            self.assertIn("module_01_prompt.json", names)
+            self.assertIn("module_05_pattern.json", names)
+            self.assertIn(result.themed_image_path.name, names)
+            self.assertIn("pipeline_report.json", names)
+            self.assertIn(result.raw_image_path.name, names)
+
+    def test_changed_scene_retries_when_result_is_perceptually_duplicate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LightingDemoPipeline(
+                sdl_path=self.sample_sdl_path,
+                output_root=Path(directory),
+                prompt_agent=FakePromptAgent(),
+                generator_factory=FakeGenerator,
+            )
+            pipeline.run(
+                "蓝天白云大草原",
+                1220,
+                370,
+                seed=20260724,
+                steps=10,
+            )
+            second = pipeline.run(
+                "沙滩和大海",
+                1220,
+                370,
+                seed=20260724,
+                steps=10,
+            )
+            report = json.loads(second.report_path.read_text(encoding="utf-8"))
+            guard = report["module_03"]["similarity_guard"]
+
+            self.assertEqual(second.seed_mode, "scene_derived")
+            self.assertEqual(second.similarity_retry_count, 1)
+            self.assertEqual(FakeGenerator.generation_count, 3)
+            self.assertEqual(guard["retry_count"], 1)
+            self.assertEqual(guard["initial_mean_absolute_difference"], 0.0)
+            self.assertNotEqual(second.effective_seed, second.requested_seed)
+
+    def test_module_five_is_between_raw_generation_and_module_four(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LightingDemoPipeline(
+                sdl_path=self.sample_sdl_path,
+                output_root=Path(directory),
+                prompt_agent=FakePromptAgent(),
+                generator_factory=FakeGenerator,
+            )
+            result = pipeline.run(
+                "温暖惬意的咖啡厅",
+                1220,
+                370,
+                seed=42,
+                steps=10,
+            )
+            report = json.loads(result.report_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                report["module_05"]["input_raw_sha256"],
+                report["module_03"]["raw_image_sha256"],
+            )
+            self.assertEqual(
+                report["module_04"]["input_raw_sha256"],
+                report["module_05"]["themed_image_sha256"],
+            )
+            self.assertEqual(
+                report["module_04"]["input_source"],
+                "module_05_themed_image",
+            )
+
+    def test_module_five_can_be_safely_disabled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LightingDemoPipeline(
+                sdl_path=self.sample_sdl_path,
+                output_root=Path(directory),
+                prompt_agent=FakePromptAgent(),
+                generator_factory=FakeGenerator,
+            )
+            result = pipeline.run(
+                "温暖惬意的咖啡厅",
+                1220,
+                370,
+                seed=42,
+                steps=10,
+                pattern_enabled=False,
+            )
+            with (
+                Image.open(result.raw_image_path) as raw,
+                Image.open(result.themed_image_path) as themed,
+            ):
+                self.assertEqual(raw.convert("RGB").tobytes(), themed.convert("RGB").tobytes())
+            self.assertEqual(result.pattern_report["quality_status"], "bypassed")
+
+    def test_sdl_quality_failure_retries_generation_once_and_records_traceability(self):
+        from dataclasses import replace
+
+        from modules.module_04_gamut_mapping.src.mapper import GamutMapper
+
+        class FailOnceMapper:
+            calls = 0
+
+            def __init__(self, palette):
+                self.mapper = GamutMapper(palette)
+
+            def map_image(self, image, *, method):
+                type(self).calls += 1
+                result = self.mapper.map_image(image, method=method)
+                if type(self).calls == 1:
+                    return replace(
+                        result,
+                        quality_failures=(
+                            "before_xy_out_of_gamut_fraction=0.500000 "
+                            "violates its maximum 0.300000",
+                        ),
+                    )
+                return result
+
+        with tempfile.TemporaryDirectory() as directory:
+            FailOnceMapper.calls = 0
+            pipeline = LightingDemoPipeline(
+                sdl_path=self.sample_sdl_path,
+                output_root=Path(directory),
+                prompt_agent=FakePromptAgent(),
+                generator_factory=FakeGenerator,
+                mapper_factory=FailOnceMapper,
+            )
+            result = pipeline.run(
+                "运动空间的抽象能量光",
+                1220,
+                370,
+                seed=45,
+                steps=10,
+            )
+            report = json.loads(result.report_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(result.sdl_retry_count, 1)
+            self.assertEqual(FakeGenerator.generation_count, 2)
+            self.assertEqual(report["module_04"]["retry_count"], 1)
+            self.assertEqual(len(report["module_04"]["attempts"]), 2)
+            self.assertTrue(report["module_04"]["attempts"][0]["failures"])
+            self.assertFalse(report["module_04"]["attempts"][1]["failures"])
+            self.assertEqual(
+                report["traceability"]["lora_sha256"],
+                "32140f4d8750e8b6b43f6440e7e28fa7ab5bb7840de68f36fb4733c81ba2ddd0",
+            )
+            self.assertIn(
+                "dataset_zip_sha256",
+                report["traceability"]["weight_provenance"],
+            )
+            self.assertIn("module_05", report)
+
+    def test_fixed_seed_mode_uses_exact_user_seed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LightingDemoPipeline(
+                sdl_path=self.sample_sdl_path,
+                output_root=Path(directory),
+                prompt_agent=FakePromptAgent(),
+                generator_factory=FakeGenerator,
+            )
+            result = pipeline.run(
+                "温暖惬意的咖啡厅",
+                1220,
+                370,
+                seed=42,
+                steps=10,
+                fixed_seed=True,
+            )
+            self.assertEqual(result.effective_seed, 42)
+            self.assertEqual(result.seed_mode, "fixed")
+
+    def test_fixed_seed_is_not_changed_by_similarity_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LightingDemoPipeline(
+                sdl_path=self.sample_sdl_path,
+                output_root=Path(directory),
+                prompt_agent=FakePromptAgent(),
+                generator_factory=FakeGenerator,
+            )
+            pipeline.run(
+                "第一个足够长的固定种子场景",
+                1220,
+                370,
+                seed=42,
+                steps=10,
+                fixed_seed=True,
+            )
+            second = pipeline.run(
+                "第二个足够长的固定种子场景",
+                1220,
+                370,
+                seed=42,
+                steps=10,
+                fixed_seed=True,
+            )
+            self.assertEqual(second.effective_seed, 42)
+            self.assertEqual(second.similarity_retry_count, 0)
+
+    def test_failed_run_removes_incomplete_run_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LightingDemoPipeline(
+                sdl_path=self.sample_sdl_path,
+                output_root=Path(directory),
+                prompt_agent=FakePromptAgent(),
+                generator_factory=FakeGenerator,
+            )
+            with self.assertRaisesRegex(ValueError, "结构化参数"):
+                pipeline.run(
+                    "足够长的场景描述",
+                    1220,
+                    370,
+                    prompt_override="edited prompt",
+                    attributes_override=None,
+                )
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_input_validation_happens_before_creating_a_run_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LightingDemoPipeline(
+                sdl_path=self.sample_sdl_path,
+                output_root=Path(directory),
+                prompt_agent=FakePromptAgent(),
+                generator_factory=FakeGenerator,
+            )
+            with self.assertRaisesRegex(ValueError, "灯具"):
+                pipeline.run("足够长的场景描述", 0, 370)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_nonfinite_input_is_rejected_before_creating_a_run_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LightingDemoPipeline(
+                sdl_path=self.sample_sdl_path,
+                output_root=Path(directory),
+                prompt_agent=FakePromptAgent(),
+                generator_factory=FakeGenerator,
+            )
+            with self.assertRaisesRegex(ValueError, "灯具"):
+                pipeline.run("足够长的场景描述", float("nan"), 370)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_green_scene_notice_explains_palette_translation(self):
+        notice = scene_palette_notice("蓝天白云大草原")
+        self.assertIn("不支持纯绿色", notice)
+        self.assertIn("保留开阔", notice)
+
+    def test_edited_prompt_rerun_skips_api_contract_and_is_recorded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LightingDemoPipeline(
+                sdl_path=self.sample_sdl_path,
+                output_root=Path(directory),
+                prompt_agent=FakePromptAgent(),
+                generator_factory=FakeGenerator,
+            )
+            attributes = FakePromptAgent().generate("test").to_dict()
+            edited = (
+                "Wide panoramic abstract light texture with pale yellow across the lower "
+                "area, light blue above, a broad vertical transition, cloud-like mist, "
+                "soft diffused bloom, evenly bright illumination, and a spacious airy "
+                "atmosphere throughout the panel."
+            )
+            result = pipeline.run(
+                "蓝天白云大草原",
+                1220,
+                370,
+                seed=44,
+                steps=10,
+                prompt_override=edited,
+                attributes_override=attributes,
+            )
+            report = json.loads(result.report_path.read_text(encoding="utf-8"))
+            self.assertEqual(result.prompt, edited)
+            self.assertEqual(report["module_01_prompt_source"], "user_edited")
+            self.assertTrue(result.palette_notice)
+
+
+class AppTests(SamplePaletteTestCase):
+    def test_gradio_app_builds_without_loading_the_diffusion_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LightingDemoPipeline(
+                sdl_path=self.sample_sdl_path,
+                output_root=Path(directory),
+                prompt_agent=FakePromptAgent(),
+                generator_factory=FakeGenerator,
+            )
+            demo = build_demo(pipeline)
+            self.assertGreater(len(demo.blocks), 10)
+            self.assertEqual(FakeGenerator.construction_count, 0)
+
+
+class BatchEvaluationTests(unittest.TestCase):
+    class FakeBatchPipeline:
+        def __init__(self, root: Path, failing_scene: str | None = None):
+            self.root = root
+            self.failing_scene = failing_scene
+            self.calls = 0
+
+        def run(self, scene, width_mm, height_mm, space_size_m2, **kwargs):
+            self.calls += 1
+            if scene == self.failing_scene:
+                raise RuntimeError("intentional test failure")
+            run_dir = self.root / f"run-{self.calls}"
+            run_dir.mkdir(parents=True)
+            image_path = run_dir / "raw.png"
+            Image.new("RGB", (96, 32), (240, 180, 100)).save(image_path)
+            report_path = run_dir / "report.json"
+            report_path.write_text("{}\n", encoding="utf-8")
+            archive_path = run_dir / "result.zip"
+            archive_path.write_bytes(b"zip")
+            return SimpleNamespace(
+                prompt=f"English lighting prompt for {scene}",
+                attributes={"density": "middle"},
+                raw_image_path=image_path,
+                sdl_preview_path=image_path,
+                sdl_control_path=image_path,
+                report_path=report_path,
+                archive_path=archive_path,
+                effective_seed=kwargs["seed"],
+                seed_mode="scene_derived",
+                raw_quality={"mean_luminance": 0.7},
+                quality={"strict_invalid_pixel_count": 0},
+                similarity_retry_count=0,
+                similarity_difference=None,
+            )
+
+    def test_test_set_loader_preserves_nonempty_scenes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            test_set = Path(directory) / "test_scenes.txt"
+            test_set.write_text("场景一\n\n 场景二 \n", encoding="utf-8")
+            self.assertEqual(load_test_scenes(test_set), ["场景一", "场景二"])
+
+    def test_batch_is_resumable_and_records_each_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pipeline = self.FakeBatchPipeline(root / "runs")
+            scenes = ["酒店大堂晨雾天光", "酒店客房黄昏助眠光"]
+            first = run_batch_evaluation(
+                pipeline,
+                scenes,
+                root / "batch",
+                config=BatchEvaluationConfig(steps=8),
+            )
+            second = run_batch_evaluation(
+                pipeline,
+                scenes,
+                root / "batch",
+                config=BatchEvaluationConfig(steps=8),
+            )
+            records = load_batch_results(root / "batch" / "batch_results.jsonl")
+
+            self.assertTrue(first["complete"])
+            self.assertEqual(second["reused_successes"], 2)
+            self.assertEqual(pipeline.calls, 2)
+            self.assertEqual(len(records), 2)
+            self.assertEqual(records[0]["chinese_prompt"], scenes[0])
+
+    def test_batch_resume_invalidates_success_when_config_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pipeline = self.FakeBatchPipeline(root / "runs")
+            scenes = ["同一个批量评估场景"]
+            run_batch_evaluation(
+                pipeline,
+                scenes,
+                root / "batch",
+                config=BatchEvaluationConfig(seed=1, steps=10),
+            )
+            second = run_batch_evaluation(
+                pipeline,
+                scenes,
+                root / "batch",
+                config=BatchEvaluationConfig(seed=999, steps=60),
+            )
+            self.assertEqual(pipeline.calls, 2)
+            self.assertEqual(second["newly_processed"], 1)
+            self.assertEqual(second["reused_successes"], 0)
+
+    def test_batch_resume_invalidates_success_when_artifact_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pipeline = self.FakeBatchPipeline(root / "runs")
+            scenes = ["需要检查产物存在性的场景"]
+            run_batch_evaluation(pipeline, scenes, root / "batch")
+            records = load_batch_results(root / "batch" / "batch_results.jsonl")
+            Path(records[0]["raw_image_path"]).unlink()
+            second = run_batch_evaluation(pipeline, scenes, root / "batch")
+            self.assertEqual(pipeline.calls, 2)
+            self.assertEqual(second["newly_processed"], 1)
+
+    def test_batch_continues_after_one_case_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pipeline = self.FakeBatchPipeline(root / "runs", "失败场景文本")
+            summary = run_batch_evaluation(
+                pipeline,
+                ["正常场景文本", "失败场景文本", "另一个正常场景"],
+                root / "batch",
+            )
+
+            self.assertEqual(summary["succeeded"], 2)
+            self.assertEqual(summary["failed"], 1)
+            self.assertFalse(summary["complete"])
+            self.assertEqual(pipeline.calls, 3)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("openpyxl"),
+        "openpyxl is required for XLSX export verification",
+    )
+    def test_exporter_fills_template_and_embeds_images(self):
+        from openpyxl import Workbook, load_workbook
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = root / "template.xlsx"
+            template_workbook = Workbook()
+            template_worksheet = template_workbook.active
+            template_worksheet.title = "prompts"
+            template_worksheet.append(
+                ["English Prompt", "中文 Prompt", "Image", "Scene"]
+            )
+            template_workbook.save(template)
+            pipeline = self.FakeBatchPipeline(root / "runs")
+            batch_dir = root / "batch"
+            run_batch_evaluation(
+                pipeline,
+                ["酒店大堂晨雾天光", "酒店客房黄昏助眠光"],
+                batch_dir,
+            )
+            output = root / "submission.xlsx"
+            summary = export_submission(
+                batch_dir / "batch_results.jsonl",
+                template,
+                output,
+            )
+            workbook = load_workbook(output)
+            worksheet = workbook["prompts"]
+
+            self.assertEqual(summary["exported_count"], 2)
+            self.assertEqual(worksheet.max_row, 3)
+            self.assertEqual(worksheet["D2"].value, "酒店大堂晨雾天光")
+            self.assertTrue(worksheet["A3"].value.startswith("English lighting prompt"))
+            self.assertEqual(len(worksheet._images), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
