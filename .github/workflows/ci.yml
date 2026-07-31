@@ -45,10 +45,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install Windows demo dependencies
+      - name: Install full Windows runtime
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[demo]"
+          python -m pip install -e ".[all]"
 
       - name: Check installed dependencies
         run: python -m pip check
