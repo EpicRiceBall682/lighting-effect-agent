@@ -3,6 +3,8 @@ setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul
 cd /d "%~dp0"
 
+if /I "%~1"=="--self-test" goto :self_test
+
 set "VENV_DIR=.venv"
 set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
 
@@ -16,7 +18,7 @@ if not exist "%VENV_PYTHON%" (
         exit /b 1
     )
     echo [INFO] Creating the Windows virtual environment...
-    %PYTHON_BOOTSTRAP% -m venv "%VENV_DIR%"
+    call :create_venv
     if errorlevel 1 goto :failed
 )
 
@@ -82,6 +84,31 @@ if not errorlevel 1 (
 python -c "import sys; raise SystemExit(0 if (3, 11) <= sys.version_info[:2] < (3, 14) else 1)" >nul 2>&1
 if not errorlevel 1 set "PYTHON_BOOTSTRAP=python"
 exit /b 0
+
+:create_venv
+%PYTHON_BOOTSTRAP% -m venv "%VENV_DIR%"
+exit /b %errorlevel%
+
+:self_test
+set "VENV_DIR=%TEMP%\lighting-effect-agent-self-test-%RANDOM%-%RANDOM%"
+set "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
+call :find_python
+if not defined PYTHON_BOOTSTRAP (
+    echo [ERROR] Python 3.11, 3.12, or 3.13 was not found.
+    exit /b 1
+)
+call :create_venv
+if errorlevel 1 goto :self_test_failed
+"%VENV_PYTHON%" -c "import sys; print(sys.version)"
+if errorlevel 1 goto :self_test_failed
+rmdir /s /q "%VENV_DIR%"
+echo [OK] Windows BAT bootstrap self-test passed.
+exit /b 0
+
+:self_test_failed
+if exist "%VENV_DIR%" rmdir /s /q "%VENV_DIR%"
+echo [ERROR] Windows BAT bootstrap self-test failed.
+exit /b 1
 
 :failed
 echo.

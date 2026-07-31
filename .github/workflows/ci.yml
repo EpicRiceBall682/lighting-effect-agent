@@ -45,6 +45,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: Exercise Windows BAT bootstrap
+        shell: cmd
+        run: start_demo_windows.bat --self-test
+
       - name: Install full Windows runtime
         run: |
           python -m pip install --upgrade pip
