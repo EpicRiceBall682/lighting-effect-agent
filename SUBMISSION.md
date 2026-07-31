@@ -7,12 +7,12 @@ The Git repository contains:
 - source code for modules 1 through 6;
 - the current LoRA weight and cryptographic provenance record;
 - the clean Colab training notebook;
-- the SDL table, 45 organizer test scenes, and official submission template;
 - dependency declarations, tests, documentation, and CI.
 
 The repository intentionally excludes virtual environments, generated outputs,
-prepared training archives, legacy model weights, raw organizer training data,
-and local credentials.
+prepared training archives, legacy model weights, organizer-provided datasets,
+color tables, submission templates, and local credentials. Authorized copies
+of those inputs must be supplied locally under `reference_data/`.
 
 ## Final verification
 
