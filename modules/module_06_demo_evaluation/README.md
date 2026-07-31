@@ -36,6 +36,15 @@
 
 ## 启动
 
+Windows 10/11 可在项目根目录双击：
+
+```text
+start_demo_windows.bat
+```
+
+脚本自动创建 `.venv` 并安装运行依赖。把授权的 SDL 色表拖到 BAT 文件上，
+可以从任意本地路径启动完整模块四；不提供色表时会进入模块三/五预览模式。
+
 在 Finder 中双击项目根目录的 `start_demo.command`，浏览器会自动打开：
 
 ```text
@@ -53,6 +62,18 @@ DeepSeek 密钥优先读取 `DEEPSEEK_API_KEY`；在 macOS 上，如果它已经
 
 第一次点击生成时需要加载 Stable Diffusion 模型；后续生成会复用同一个模型。
 每次运行的全部文件保存在 `outputs/demo/<时间戳_随机编号>/`。
+
+跨平台命令行参数：
+
+```text
+--sdl-path <文件>   指定本地 SDL 色表
+--require-sdl       缺少 SDL 色表时拒绝启动
+--device auto       自动选择 CUDA、MPS 或 CPU
+```
+
+公开仓库不包含授权资料。未配置 SDL 色表时，页面会显示模块三 Raw、模块五主题
+结果和明确的不可用控制图占位符；报告中的模块四状态为
+`skipped_missing_sdl_table`，不会产生虚假的硬件合规结论。
 
 界面生成的是受赛题配色和硬件色域约束的“抽象灯具光效”，不是场景照片。
 完成一次自动生成后，可以直接修改页面中的英文提示词，再点击

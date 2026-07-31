@@ -8,6 +8,8 @@ from typing import Any
 
 import gradio as gr
 
+from modules.module_04_gamut_mapping.src.sdl_palette import DEFAULT_SDL_PATH
+
 from .pipeline import DEFAULT_OUTPUT_ROOT, LightingDemoPipeline
 
 
@@ -116,10 +118,17 @@ footer { display: none !important; }
 
 
 def _format_metrics(
-    quality: dict[str, int | float],
+    quality: dict[str, Any],
     raw_quality: dict[str, Any] | None = None,
     color_guidance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if quality.get("mapping_available") is False:
+        return {
+            "SDL 映射状态": "未运行（缺少本地 SDL 色表）",
+            "当前输出": "模块三 Raw 与模块五主题预览",
+            "硬件色域保证": "无；配置 SDL 色表后才可验证",
+            "输出尺寸": f'{quality.get("pixel_count", 0)} pixels',
+        }
     metrics = {
         "SDL 严格无效像素": int(quality["strict_invalid_pixel_count"]),
         "映射前超出 SDL 色域比例": round(
@@ -182,6 +191,12 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
     """Create the UI; dependency injection keeps construction testable."""
 
     pipeline = pipeline or LightingDemoPipeline()
+    startup_status = "### 等待生成\n填写左侧信息后点击“生成完整光效”。"
+    if not pipeline.sdl_path.is_file():
+        startup_status += (
+            "\n\n⚠️ 当前未检测到本地 SDL 色表。界面仍可生成模块三 Raw "
+            "与模块五主题预览，但不会声称输出满足硬件色域。"
+        )
 
     def _run_and_format(
         scene: str,
@@ -222,10 +237,13 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
         status = (
             "### 生成完成\n"
             f"已输出 `{result.width} × {result.height}` 光效图；"
-            f"SDL 严格无效像素为 "
-            f"`{result.quality['strict_invalid_pixel_count']}`；"
             f"本次有效种子为 `{result.effective_seed}`。"
         )
+        if result.sdl_available:
+            status += (
+                f" SDL 严格无效像素为 "
+                f"`{result.quality['strict_invalid_pixel_count']}`。"
+            )
         if result.color_guidance.get("render_mode") == (
             "structured_horizontal_gradient_with_lora_luminance"
         ):
@@ -238,18 +256,26 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                 f"主色为 `{plan.get('dominant_color', '未标注')}`，"
                 f"LoRA 仅保留 `{texture_strength:.3f}` 强度的低频亮度纹理。"
             )
-        if float(result.quality["before_xy_out_of_gamut_fraction"]) == 0.0:
-            status += "\n\n所有 Raw 颜色均已位于 SDL 色域内，模块四无需改变视觉预览。"
+        if not result.sdl_available:
+            status += f"\n\n⚠️ {result.sdl_notice}"
         else:
-            status += (
-                "\n\n⚠️ Raw 设计色有一部分超出 SDL 硬件色域；"
-                "系统保留鲜艳 Raw 图，并另外输出压缩后的硬件预览与严格控制图。"
-            )
-        if float(result.quality["p95_delta_e76"]) > 45.0:
-            status += (
-                " 本次硬件预览与 Raw 的色差较明显，请以模块三 Raw 评估设计色，"
-                "以模块四结果评估实际硬件可实现效果。"
-            )
+            if float(result.quality["before_xy_out_of_gamut_fraction"]) == 0.0:
+                status += (
+                    "\n\n所有 Raw 颜色均已位于 SDL 色域内，"
+                    "模块四无需改变视觉预览。"
+                )
+            else:
+                status += (
+                    "\n\n⚠️ Raw 设计色有一部分超出 SDL 硬件色域；"
+                    "系统保留鲜艳 Raw 图，并另外输出压缩后的硬件预览"
+                    "与严格控制图。"
+                )
+            if float(result.quality["p95_delta_e76"]) > 45.0:
+                status += (
+                    " 本次硬件预览与 Raw 的色差较明显，"
+                    "请以模块三 Raw 评估设计色，"
+                    "以模块四结果评估实际硬件可实现效果。"
+                )
         if result.artifact_cleanup.get("applied"):
             status += "\n\n模块三已执行局部色斑抑制与轻度平滑。"
         pattern_status = str(result.pattern_report.get("quality_status", ""))
@@ -435,7 +461,7 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
 
                 with gr.Column(scale=7):
                     status = gr.Markdown(
-                        "### 等待生成\n填写左侧信息后点击“生成完整光效”。",
+                        startup_status,
                         elem_classes=["panel", "status-card"],
                     )
                     palette_notice = gr.Markdown(
@@ -477,7 +503,7 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                     elem_classes=["result-image"],
                 )
                 sdl_preview = gr.Image(
-                    label="模块四 · SDL 高保真视觉预览",
+                    label="模块四 · SDL 视觉预览（未配置时显示模块五结果）",
                     type="filepath",
                     interactive=False,
                     buttons=["download", "fullscreen"],
@@ -505,7 +531,7 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                         buttons=["download", "fullscreen"],
                     )
                     control_image = gr.Image(
-                        label="严格 SDL 控制图",
+                        label="严格 SDL 控制图（缺少色表时显示不可用占位图）",
                         type="filepath",
                         interactive=False,
                         buttons=["download", "fullscreen"],
@@ -586,13 +612,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--device", choices=("auto", "mps", "cuda", "cpu"), default="auto")
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument(
+        "--sdl-path",
+        type=Path,
+        default=DEFAULT_SDL_PATH,
+        help="Path to the private SDL color table; preview mode is used when absent",
+    )
+    parser.add_argument(
+        "--require-sdl",
+        action="store_true",
+        help="Refuse generation when the SDL color table is missing",
+    )
     parser.add_argument("--inbrowser", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    pipeline = LightingDemoPipeline(output_root=args.output_root, device=args.device)
+    if args.require_sdl and not args.sdl_path.expanduser().is_file():
+        raise SystemExit(
+            "SDL color table does not exist: "
+            f"{args.sdl_path.expanduser().resolve()}"
+        )
+    pipeline = LightingDemoPipeline(
+        output_root=args.output_root,
+        device=args.device,
+        sdl_path=args.sdl_path,
+        allow_missing_sdl=not args.require_sdl,
+    )
     demo = build_demo(pipeline)
     theme = gr.themes.Soft(
         primary_hue="orange",

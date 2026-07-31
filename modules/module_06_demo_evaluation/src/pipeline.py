@@ -21,6 +21,7 @@ import zipfile
 
 import numpy as np
 from PIL import Image
+from PIL import ImageDraw
 
 from modules.module_01_prompt_agent.src.agent import LightingPromptAgent
 from modules.module_01_prompt_agent.src.schemas import LightingEffectAttributes
@@ -146,7 +147,7 @@ class DemoPipelineResult:
     pattern_manifest_path: Path
     report_path: Path
     archive_path: Path
-    quality: dict[str, int | float]
+    quality: dict[str, Any]
     raw_quality: dict[str, Any]
     artifact_cleanup: dict[str, Any]
     color_guidance: dict[str, Any]
@@ -161,6 +162,90 @@ class DemoPipelineResult:
     similarity_retry_count: int
     similarity_difference: float | None
     sdl_retry_count: int
+    sdl_available: bool
+    sdl_notice: str
+
+
+@dataclass(frozen=True, slots=True)
+class UnavailableSDLQuality:
+    """Explicit non-metrics used when the private SDL table is unavailable."""
+
+    pixel_count: int
+    status: str = "skipped_missing_sdl_table"
+    mapping_available: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class UnavailableSDLPolicy:
+    """Policy placeholder that keeps reporting code uniform in preview mode."""
+
+    reason: str
+
+    def advisories(self, _quality: Any) -> tuple[str, ...]:
+        return (self.reason,)
+
+
+@dataclass(frozen=True, slots=True)
+class UnavailableSDLResult:
+    """Pass-through preview and unmistakable placeholders for missing SDL data."""
+
+    image: Image.Image
+    control_image: Image.Image
+    out_of_gamut_mask: Image.Image
+    quality: UnavailableSDLQuality
+    quality_policy: UnavailableSDLPolicy
+    quality_failures: tuple[str, ...] = ()
+    method: str = "unavailable"
+    available: bool = False
+
+    @property
+    def accepted(self) -> bool:
+        return False
+
+
+def unavailable_sdl_result(image: Image.Image, sdl_path: Path) -> UnavailableSDLResult:
+    """Return module-three/five preview output without claiming SDL compliance."""
+
+    preview = image.convert("RGB").copy()
+    width, height = preview.size
+    control = Image.new("RGB", preview.size, (42, 42, 46))
+    draw = ImageDraw.Draw(control)
+    line_width = max(2, min(width, height) // 80)
+    draw.line((0, 0, width, height), fill=(180, 84, 84), width=line_width)
+    draw.line((0, height, width, 0), fill=(180, 84, 84), width=line_width)
+    message = "SDL TABLE REQUIRED"
+    text_box = draw.textbbox((0, 0), message)
+    text_width = text_box[2] - text_box[0]
+    text_height = text_box[3] - text_box[1]
+    draw.rectangle(
+        (
+            max(0, (width - text_width) // 2 - 10),
+            max(0, (height - text_height) // 2 - 8),
+            min(width, (width + text_width) // 2 + 10),
+            min(height, (height + text_height) // 2 + 8),
+        ),
+        fill=(42, 42, 46),
+    )
+    draw.text(
+        ((width - text_width) // 2, (height - text_height) // 2),
+        message,
+        fill=(245, 230, 230),
+    )
+    mask = Image.new("L", preview.size, 0)
+    reason = (
+        "SDL mapping was skipped because the private color table is missing: "
+        f"{sdl_path}"
+    )
+    return UnavailableSDLResult(
+        image=preview,
+        control_image=control,
+        out_of_gamut_mask=mask,
+        quality=UnavailableSDLQuality(pixel_count=width * height),
+        quality_policy=UnavailableSDLPolicy(reason=reason),
+    )
 
 
 class LightingDemoPipeline:
@@ -185,6 +270,7 @@ class LightingDemoPipeline:
         mapper_factory: Callable[[SDLPalette], Any] = GamutMapper,
         pattern_generator: Any | None = None,
         lora_scale: float = 0.8,
+        allow_missing_sdl: bool = True,
     ) -> None:
         self.output_root = Path(output_root).expanduser().resolve()
         self.device = device
@@ -197,6 +283,7 @@ class LightingDemoPipeline:
         self.mapper_factory = mapper_factory
         self.pattern_generator = pattern_generator or PatternGenerator()
         self.lora_scale = lora_scale
+        self.allow_missing_sdl = bool(allow_missing_sdl)
         self._generator: Any | None = None
         self._mapper: Any | None = None
         self._run_lock = threading.Lock()
@@ -220,7 +307,15 @@ class LightingDemoPipeline:
             )
         return self._generator
 
-    def _get_mapper(self) -> Any:
+    def _get_mapper(self) -> Any | None:
+        if not self.sdl_path.is_file():
+            if self.allow_missing_sdl:
+                return None
+            raise FileNotFoundError(
+                "SDL color table does not exist: "
+                f"{self.sdl_path}. Copy the authorized table to this path or "
+                "start the demo without --require-sdl to use preview mode."
+            )
         if self._mapper is None:
             palette = SDLPalette.from_file(self.sdl_path)
             self._mapper = self.mapper_factory(palette)
@@ -477,8 +572,27 @@ class LightingDemoPipeline:
             with Image.open(pattern.image_path) as opened:
                 mapping_image = opened.convert("RGB").copy()
 
-            self._notify(progress, 0.78, "模块四：正在进行 SDL 色域映射")
-            mapped = self._get_mapper().map_image(mapping_image, method="smooth")
+            mapper = self._get_mapper()
+            if mapper is None:
+                self._notify(
+                    progress,
+                    0.78,
+                    "模块四：未配置 SDL 色表，正在输出模块三/五预览",
+                )
+                mapped = unavailable_sdl_result(mapping_image, self.sdl_path)
+            else:
+                self._notify(progress, 0.78, "模块四：正在进行 SDL 色域映射")
+                mapped = mapper.map_image(mapping_image, method="smooth")
+            sdl_available = bool(getattr(mapped, "available", True))
+            sdl_notice = (
+                ""
+                if sdl_available
+                else (
+                    "未找到本地 SDL 色表，模块四已跳过；"
+                    "当前仅输出模块三 Raw 和模块五主题预览，"
+                    "不代表硬件可实现色域。"
+                )
+            )
             sdl_attempts = [
                 {
                     "attempt": 0,
@@ -491,7 +605,12 @@ class LightingDemoPipeline:
                 }
             ]
             sdl_retry_count = 0
-            if mapped.quality_failures and MAX_SDL_RETRIES and not fixed_seed:
+            if (
+                sdl_available
+                and mapped.quality_failures
+                and MAX_SDL_RETRIES
+                and not fixed_seed
+            ):
                 first_generation = generation
                 first_pattern = pattern
                 sdl_retry_count = 1
@@ -568,9 +687,10 @@ class LightingDemoPipeline:
                     )
 
             stem = generation.image_path.stem
-            sdl_preview_path = run_dir / f"{stem}_sdl_smooth.png"
-            sdl_control_path = run_dir / f"{stem}_sdl_smooth_control.png"
-            mask_path = run_dir / f"{stem}_out_of_gamut_mask.png"
+            suffix = "sdl_smooth" if sdl_available else "sdl_unavailable_preview"
+            sdl_preview_path = run_dir / f"{stem}_{suffix}.png"
+            sdl_control_path = run_dir / f"{stem}_{suffix}_control.png"
+            mask_path = run_dir / f"{stem}_{suffix}_mask.png"
             mapped.image.save(sdl_preview_path, format="PNG")
             mapped.control_image.save(sdl_control_path, format="PNG")
             mapped.out_of_gamut_mask.save(mask_path, format="PNG")
@@ -591,7 +711,7 @@ class LightingDemoPipeline:
             report_path = run_dir / "pipeline_report.json"
             report = {
                 "traceability": {
-                    "pipeline_schema_version": 4,
+                    "pipeline_schema_version": 5,
                     "base_model": generation_details.get(
                         "base_model",
                         self.base_model,
@@ -608,7 +728,11 @@ class LightingDemoPipeline:
                     "weight_provenance_path": str(provenance_path),
                     "weight_provenance": weight_provenance,
                     "sdl_table_path": str(self.sdl_path),
-                    "sdl_table_sha256": _sha256_file(self.sdl_path),
+                    "sdl_table_sha256": (
+                        _sha256_file(self.sdl_path)
+                        if self.sdl_path.is_file()
+                        else None
+                    ),
                 },
                 "scene": scene,
                 "fixture": {
@@ -666,11 +790,19 @@ class LightingDemoPipeline:
                     "render": pattern.render_report,
                 },
                 "module_04": {
-                    "method": "smooth",
+                    "available": sdl_available,
+                    "notice": sdl_notice,
+                    "method": "smooth" if sdl_available else None,
                     "preview_algorithm": (
                         "continuous_xy_projection_out_of_gamut_only"
+                        if sdl_available
+                        else "module_05_passthrough_preview"
                     ),
-                    "control_algorithm": "strict_sdl_ordered_dither",
+                    "control_algorithm": (
+                        "strict_sdl_ordered_dither"
+                        if sdl_available
+                        else None
+                    ),
                     "sdl_preview_path": str(sdl_preview_path),
                     "sdl_control_path": str(sdl_control_path),
                     "out_of_gamut_mask_path": str(mask_path),
@@ -681,7 +813,13 @@ class LightingDemoPipeline:
                     "quality": quality,
                     "quality_policy": asdict(mapped.quality_policy),
                     "quality_status": (
-                        "accepted" if mapped.accepted else "rejected"
+                        "accepted"
+                        if sdl_available and mapped.accepted
+                        else (
+                            "rejected"
+                            if sdl_available
+                            else "skipped_missing_sdl_table"
+                        )
                     ),
                     "quality_failures": list(mapped.quality_failures),
                     "quality_advisories": list(
@@ -761,4 +899,6 @@ class LightingDemoPipeline:
                 similarity_retry_count=retry_count,
                 similarity_difference=final_difference,
                 sdl_retry_count=sdl_retry_count,
+                sdl_available=sdl_available,
+                sdl_notice=sdl_notice,
             )

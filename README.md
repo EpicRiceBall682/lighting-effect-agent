@@ -11,7 +11,41 @@ LoRA 生成宽幅 Raw 光效图，再映射到目标 SDL 硬件色域。核心�
 模块五以低频连续主题光场增强接入模块三与模块四之间；质量不通过时会
 自动降低强度或安全绕过，不会阻断 SDL 输出。
 
-## 快速开始
+## Windows 快速开始
+
+支持 Windows 10/11 与 Python 3.11～3.13。下载并解压仓库后，双击：
+
+```text
+start_demo_windows.bat
+```
+
+脚本会自动创建 `.venv`、安装依赖、询问当前进程使用的 DeepSeek API Key，
+并打开 `http://127.0.0.1:7860/`。API Key 不会写入项目文件。
+
+如需启用模块四，把已获授权的 `SDL2_0.txt` 放到：
+
+```text
+reference_data\颜色信息\SDL2_0.txt
+```
+
+也可以把该文件直接拖到 `start_demo_windows.bat` 上。公开仓库不包含私有色表；
+缺少色表时 Demo 仍会运行模块一、三、五，并明确标记为“预览模式”，不会把结果
+误报为满足 SDL 硬件色域。
+
+PowerShell 手动启动方式：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[all]"
+$env:DEEPSEEK_API_KEY="你的 DeepSeek API Key"
+.\.venv\Scripts\python.exe -m modules.module_06_demo_evaluation.src.app --inbrowser
+```
+
+第一次生成会从 Hugging Face 下载 Stable Diffusion 1.5 基础模型。没有可用的
+NVIDIA CUDA 环境时会自动使用 CPU，功能可用但生成速度会明显变慢。
+
+## macOS / Linux 快速开始
 
 支持 Python 3.11～3.13。在项目根目录创建环境并安装完整运行依赖：
 
@@ -42,6 +76,16 @@ python -m modules.module_06_demo_evaluation.src.app --inbrowser
 
 macOS 也可以双击 `start_demo.command`；该脚本优先使用现有的
 `.venv-module3` 环境，否则使用按上文创建的 `.venv` 环境。
+
+可通过任意平台的 `--sdl-path` 指定私有色表；需要强制完整模块四输出时增加
+`--require-sdl`，缺少文件会立即退出：
+
+```bash
+python -m modules.module_06_demo_evaluation.src.app \
+  --sdl-path "reference_data/颜色信息/SDL2_0.txt" \
+  --require-sdl \
+  --inbrowser
+```
 
 也可以使用根目录兼容入口：
 
@@ -92,8 +136,8 @@ python -m unittest discover -s modules -p "test_*.py" -v
 
 离线测试不会下载基础模型，也不会调用 DeepSeek API。
 
-当前发布候选版本包含 119 项单元测试。GitHub Actions 会在 `main` 分支推送
-和 Pull Request 时自动安装依赖、检查依赖一致性、编译源码并运行完整测试。
+GitHub Actions 会在 `main` 分支推送和 Pull Request 时自动执行 Linux 完整测试，
+并在 Windows 上验证安装、源码编译、Demo 流水线和 SDL 缺失降级逻辑。
 
 ## 可复现性
 

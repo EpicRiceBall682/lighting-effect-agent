@@ -82,7 +82,7 @@ def _evaluation_signature(
     pipeline_settings: dict[str, Any] = {
         "pipeline_type": f"{type(pipeline).__module__}.{type(pipeline).__qualname__}",
     }
-    for name in ("device", "base_model", "lora_scale"):
+    for name in ("device", "base_model", "lora_scale", "allow_missing_sdl"):
         if hasattr(pipeline, name):
             pipeline_settings[name] = getattr(pipeline, name)
     for name in ("lora_path", "sdl_path"):
@@ -240,6 +240,10 @@ def run_batch_evaluation(
                 "color_guidance": getattr(result, "color_guidance", {}),
                 "pattern_report": getattr(result, "pattern_report", {}),
                 "sdl_quality": result.quality,
+                "sdl_available": bool(
+                    getattr(result, "sdl_available", True)
+                ),
+                "sdl_notice": str(getattr(result, "sdl_notice", "")),
                 "quality_retry_count": int(
                     getattr(result, "quality_retry_count", 0)
                 ),

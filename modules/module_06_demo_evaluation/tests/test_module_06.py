@@ -17,7 +17,11 @@ from modules.module_03_image_generation.src.generator import GenerationResult
 from modules.module_04_gamut_mapping.tests.sample_palette import (
     write_sample_sdl_palette,
 )
-from modules.module_06_demo_evaluation.src.app import build_demo
+from modules.module_06_demo_evaluation.src.app import (
+    _format_metrics,
+    build_demo,
+    build_parser,
+)
 from modules.module_06_demo_evaluation.src.evaluator import (
     BatchEvaluationConfig,
     load_test_scenes,
@@ -398,6 +402,59 @@ class PipelineTests(SamplePaletteTestCase):
         self.assertIn("不支持纯绿色", notice)
         self.assertIn("保留开阔", notice)
 
+    def test_missing_sdl_table_uses_explicit_preview_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            missing_sdl = root / "private" / "SDL2_0.txt"
+            pipeline = LightingDemoPipeline(
+                sdl_path=missing_sdl,
+                output_root=root / "outputs",
+                prompt_agent=FakePromptAgent(),
+                generator_factory=FakeGenerator,
+            )
+            result = pipeline.run(
+                "Windows 本地预览模式场景",
+                1220,
+                370,
+                seed=42,
+                steps=10,
+            )
+            report = json.loads(result.report_path.read_text(encoding="utf-8"))
+
+            self.assertFalse(result.sdl_available)
+            self.assertEqual(
+                result.quality["status"],
+                "skipped_missing_sdl_table",
+            )
+            self.assertTrue(result.sdl_preview_path.is_file())
+            self.assertTrue(result.sdl_control_path.is_file())
+            self.assertTrue(result.out_of_gamut_mask_path.is_file())
+            self.assertEqual(
+                report["module_04"]["quality_status"],
+                "skipped_missing_sdl_table",
+            )
+            self.assertIsNone(report["traceability"]["sdl_table_sha256"])
+
+    def test_missing_sdl_table_can_be_required(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pipeline = LightingDemoPipeline(
+                sdl_path=root / "missing.txt",
+                output_root=root,
+                prompt_agent=FakePromptAgent(),
+                generator_factory=FakeGenerator,
+                allow_missing_sdl=False,
+            )
+            with self.assertRaisesRegex(FileNotFoundError, "SDL color table"):
+                pipeline.run(
+                    "必须使用 SDL 的测试场景",
+                    1220,
+                    370,
+                    seed=42,
+                    steps=10,
+                )
+            self.assertEqual(list(root.iterdir()), [])
+
     def test_edited_prompt_rerun_skips_api_contract_and_is_recorded(self):
         with tempfile.TemporaryDirectory() as directory:
             pipeline = LightingDemoPipeline(
@@ -440,6 +497,24 @@ class AppTests(SamplePaletteTestCase):
             demo = build_demo(pipeline)
             self.assertGreater(len(demo.blocks), 10)
             self.assertEqual(FakeGenerator.construction_count, 0)
+
+    def test_windows_friendly_sdl_cli_options(self):
+        args = build_parser().parse_args(
+            ["--sdl-path", r"C:\private\SDL2_0.txt", "--require-sdl"]
+        )
+        self.assertEqual(str(args.sdl_path), r"C:\private\SDL2_0.txt")
+        self.assertTrue(args.require_sdl)
+
+    def test_metrics_do_not_claim_sdl_compliance_in_preview_mode(self):
+        metrics = _format_metrics(
+            {
+                "mapping_available": False,
+                "status": "skipped_missing_sdl_table",
+                "pixel_count": 1024,
+            }
+        )
+        self.assertIn("未运行", metrics["SDL 映射状态"])
+        self.assertIn("无", metrics["硬件色域保证"])
 
 
 class BatchEvaluationTests(unittest.TestCase):
