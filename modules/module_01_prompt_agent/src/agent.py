@@ -6,6 +6,8 @@ import json
 import re
 from typing import Any, Mapping, Protocol, Sequence
 
+from modules.color_vocabulary import matched_color_spans
+
 from .client import DeepSeekClient
 from .prompt_builder import build_system_prompt, build_user_prompt
 from .schemas import LightingEffectAttributes, LightingEffectValidationError
@@ -66,6 +68,18 @@ def _scene_color_validation_error(
     return None
 
 
+def _normalize_effect_for_uniqueness(effect: str) -> str:
+    """Normalize an English effect caption for batch-level duplicate checks."""
+
+    return " ".join(EFFECT_WORD_PATTERN.findall(str(effect).casefold()))
+
+
+def _effect_design_signature(effect: str) -> tuple[str, ...]:
+    """Return the ordered supported colors that determine the rendered gradient."""
+
+    return tuple(name for _start, _end, name, _rgb in matched_color_spans(effect))
+
+
 def _repair_near_boundary_effect_length(
     raw: Mapping[str, Any],
 ) -> dict[str, Any] | None:
@@ -120,7 +134,19 @@ class LightingPromptAgent:
         hardware_width_mm: float | None = None,
         hardware_height_mm: float | None = None,
         space_size_m2: float | None = None,
+        forbidden_effects: Sequence[str] = (),
+        forbidden_design_effects: Sequence[str] = (),
     ) -> LightingEffectAttributes:
+        forbidden_normalized = {
+            _normalize_effect_for_uniqueness(effect)
+            for effect in forbidden_effects
+            if str(effect).strip()
+        }
+        forbidden_designs = {
+            _effect_design_signature(effect)
+            for effect in forbidden_design_effects
+            if _effect_design_signature(effect)
+        }
         messages: list[dict[str, str]] = [
             {"role": "system", "content": build_system_prompt()},
             {
@@ -144,6 +170,24 @@ class LightingPromptAgent:
                 )
                 if scene_color_error:
                     raise LightingEffectValidationError(scene_color_error)
+                if (
+                    _normalize_effect_for_uniqueness(attributes.effect)
+                    in forbidden_normalized
+                ):
+                    design_signature = _effect_design_signature(attributes.effect)
+                    if design_signature:
+                        forbidden_designs.add(design_signature)
+                    raise LightingEffectValidationError(
+                        "effect duplicates a prompt already used for another scene; "
+                        "create a materially distinct palette or color proportion for "
+                        "this scene instead of merely rephrasing the same design"
+                    )
+                if _effect_design_signature(attributes.effect) in forbidden_designs:
+                    raise LightingEffectValidationError(
+                        "effect reuses the same ordered color design as a rejected prompt; "
+                        "change at least one supported color or swap the dominant and "
+                        "secondary color roles"
+                    )
                 if space_size_m2 is not None:
                     expected_density = density_for_space_size(space_size_m2)
                     if attributes.density != expected_density:
@@ -165,6 +209,30 @@ class LightingPromptAgent:
                             if scene_color_error:
                                 raise LightingEffectValidationError(
                                     scene_color_error
+                                )
+                            if (
+                                _normalize_effect_for_uniqueness(attributes.effect)
+                                in forbidden_normalized
+                            ):
+                                design_signature = _effect_design_signature(
+                                    attributes.effect
+                                )
+                                if design_signature:
+                                    forbidden_designs.add(design_signature)
+                                raise LightingEffectValidationError(
+                                    "effect duplicates a prompt already used for another "
+                                    "scene; create a materially distinct palette or color "
+                                    "proportion for this scene instead of merely rephrasing "
+                                    "the same design"
+                                )
+                            if (
+                                _effect_design_signature(attributes.effect)
+                                in forbidden_designs
+                            ):
+                                raise LightingEffectValidationError(
+                                    "effect reuses the same ordered color design as a "
+                                    "rejected prompt; change at least one supported color "
+                                    "or swap the dominant and secondary color roles"
                                 )
                             if space_size_m2 is not None:
                                 expected_density = density_for_space_size(space_size_m2)

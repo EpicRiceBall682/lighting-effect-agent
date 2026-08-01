@@ -354,6 +354,55 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.density, "high")
         self.assertIn("density must be high", client.calls[1][-1]["content"])
 
+    def test_retries_when_effect_duplicates_an_existing_batch_prompt(self):
+        corrected = dict(
+            VALID_RESPONSE,
+            effect=(
+                "Wide panoramic organizer-style color field with light peach on the left "
+                "and dominant soft orange across the center and right, forming a clean "
+                "smooth horizontal gradient with uniform vertical color, warm illumination, "
+                "quiet hospitality, and an uninterrupted surface throughout."
+            ),
+        )
+        client = FakeClient([VALID_RESPONSE, corrected])
+        result = LightingPromptAgent(client, validation_retries=1).generate(
+            "酒店套房客厅，休闲氛围",
+            forbidden_effects=[VALID_RESPONSE["effect"]],
+        )
+
+        self.assertEqual(result.effect, corrected["effect"])
+        self.assertEqual(len(client.calls), 2)
+        self.assertIn("duplicates a prompt", client.calls[1][-1]["content"])
+
+    def test_retries_when_repair_rephrases_the_same_ordered_color_design(self):
+        rephrased_same_design = dict(
+            VALID_RESPONSE,
+            effect=(
+                "Wide panoramic organizer-style color field with pale yellow on the left "
+                "and dominant soft pink across the center and right, forming a clean "
+                "smooth horizontal gradient with uniform vertical color, calm illumination, "
+                "gentle identity, and an uninterrupted surface throughout."
+            ),
+        )
+        corrected = dict(
+            VALID_RESPONSE,
+            effect=(
+                "Wide panoramic organizer-style color field with light peach on the left "
+                "and dominant soft orange across the center and right, forming a clean "
+                "smooth horizontal gradient with uniform vertical color, warm illumination, "
+                "quiet hospitality, and an uninterrupted surface throughout."
+            ),
+        )
+        client = FakeClient([rephrased_same_design, corrected])
+        result = LightingPromptAgent(client, validation_retries=1).generate(
+            "酒店套房客厅，休闲氛围",
+            forbidden_design_effects=[VALID_RESPONSE["effect"]],
+        )
+
+        self.assertEqual(result.effect, corrected["effect"])
+        self.assertEqual(len(client.calls), 2)
+        self.assertIn("same ordered color design", client.calls[1][-1]["content"])
+
     def test_clear_blue_sky_retries_when_model_adds_warm_color(self):
         invalid = dict(
             VALID_RESPONSE,

@@ -176,6 +176,7 @@ def run_batch_evaluation(
     evaluation_signature = _evaluation_signature(pipeline, config)
 
     completed: list[dict[str, Any]] = []
+    accepted_prompts: list[str] = []
     newly_processed = 0
     reused = 0
     for index, scene in enumerate(normalized_scenes, 1):
@@ -188,6 +189,9 @@ def run_batch_evaluation(
             and _result_artifacts_exist(previous)
         ):
             completed.append(previous)
+            previous_prompt = str(previous.get("english_prompt", "")).strip()
+            if previous_prompt:
+                accepted_prompts.append(previous_prompt)
             reused += 1
             continue
 
@@ -214,6 +218,7 @@ def run_batch_evaluation(
                 seed=config.seed,
                 steps=config.steps,
                 fixed_seed=config.fixed_seed,
+                forbidden_prompts=tuple(accepted_prompts),
             )
             record = {
                 **base_record,
@@ -261,6 +266,8 @@ def run_batch_evaluation(
                 "error": str(exc),
             }
         _append_record(results_path, record)
+        if record.get("status") == "success":
+            accepted_prompts.append(str(record.get("english_prompt", "")))
         existing[case_id] = record
         completed.append(record)
         newly_processed += 1

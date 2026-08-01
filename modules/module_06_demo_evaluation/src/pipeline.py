@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import sys
 import threading
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Sequence
 from uuid import uuid4
 import zipfile
 
@@ -418,6 +418,8 @@ class LightingDemoPipeline:
         fixed_seed: bool = False,
         prompt_override: str | None = None,
         attributes_override: dict[str, Any] | None = None,
+        forbidden_prompts: Sequence[str] = (),
+        forbidden_prompt_designs: Sequence[str] = (),
         pattern_enabled: bool = True,
         pattern_strength: float | None = None,
         progress: Callable[[float, str], Any] | None = None,
@@ -456,6 +458,8 @@ class LightingDemoPipeline:
                     hardware_width_mm=width_mm,
                     hardware_height_mm=height_mm,
                     space_size_m2=space_size_m2,
+                    forbidden_effects=forbidden_prompts,
+                    forbidden_design_effects=forbidden_prompt_designs,
                 )
                 prompt_source = "deepseek"
             attributes_dict = attributes.to_dict()

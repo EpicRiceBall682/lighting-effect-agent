@@ -523,9 +523,11 @@ class BatchEvaluationTests(unittest.TestCase):
             self.root = root
             self.failing_scene = failing_scene
             self.calls = 0
+            self.forbidden_prompt_calls = []
 
         def run(self, scene, width_mm, height_mm, space_size_m2, **kwargs):
             self.calls += 1
+            self.forbidden_prompt_calls.append(tuple(kwargs.get("forbidden_prompts", ())))
             if scene == self.failing_scene:
                 raise RuntimeError("intentional test failure")
             run_dir = self.root / f"run-{self.calls}"
@@ -582,6 +584,11 @@ class BatchEvaluationTests(unittest.TestCase):
             self.assertEqual(pipeline.calls, 2)
             self.assertEqual(len(records), 2)
             self.assertEqual(records[0]["chinese_prompt"], scenes[0])
+            self.assertEqual(pipeline.forbidden_prompt_calls[0], ())
+            self.assertEqual(
+                pipeline.forbidden_prompt_calls[1],
+                (f"English lighting prompt for {scenes[0]}",),
+            )
 
     def test_batch_resume_invalidates_success_when_config_changes(self):
         with tempfile.TemporaryDirectory() as directory:
