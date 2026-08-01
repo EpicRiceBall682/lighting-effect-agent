@@ -39,6 +39,9 @@ if errorlevel 1 (
     if errorlevel 1 goto :failed
 )
 
+call :select_device
+if errorlevel 1 goto :failed
+
 if not defined DEEPSEEK_API_KEY (
     echo.
     echo [INFO] DEEPSEEK_API_KEY is not set for this terminal.
@@ -61,8 +64,26 @@ if exist "%SDL_PATH%" (
 echo.
 echo [INFO] Starting http://127.0.0.1:7860/
 echo [INFO] The first generation downloads the Stable Diffusion base model.
-"%VENV_PYTHON%" -m modules.module_06_demo_evaluation.src.app --inbrowser --sdl-path "%SDL_PATH%"
+"%VENV_PYTHON%" -m modules.module_06_demo_evaluation.src.app --device "%DEVICE%" --inbrowser --sdl-path "%SDL_PATH%"
 if errorlevel 1 goto :failed
+exit /b 0
+
+:select_device
+set "DEVICE=cpu"
+"%VENV_PYTHON%" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" >nul 2>&1
+if errorlevel 1 (
+    echo [WARN] CUDA is not available to PyTorch. Image generation will use the CPU.
+    where nvidia-smi >nul 2>&1
+    if not errorlevel 1 (
+        echo [WARN] An NVIDIA driver was detected, but this PyTorch installation cannot use CUDA.
+        echo [WARN] Install a matching Windows CUDA build from:
+        echo        https://pytorch.org/get-started/locally/
+    )
+    exit /b 0
+)
+set "DEVICE=cuda"
+"%VENV_PYTHON%" -c "import torch; print('[OK] CUDA image generation: ' + torch.cuda.get_device_name(0))"
+if errorlevel 1 exit /b 1
 exit /b 0
 
 :find_python

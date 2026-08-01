@@ -42,8 +42,11 @@ Windows 10/11 可在项目根目录双击：
 start_demo_windows.bat
 ```
 
-脚本自动创建 `.venv` 并安装运行依赖。把授权的 SDL 色表拖到 BAT 文件上，
-可以从任意本地路径启动完整模块四；不提供色表时会进入模块三/五预览模式。
+脚本自动创建 `.venv` 并安装运行依赖。启动前会检测 PyTorch CUDA：可用时明确
+选择 `--device cuda` 并显示 NVIDIA 显卡名称，不可用时提示并回退 CPU；检测到
+NVIDIA 驱动但 PyTorch 不支持 CUDA 时，会显示官方安装入口。把授权的 SDL 色表
+拖到 BAT 文件上，可以从任意本地路径启动完整模块四；不提供色表时会进入
+模块三/五预览模式。
 
 在 Finder 中双击项目根目录的 `start_demo.command`，浏览器会自动打开：
 

@@ -39,6 +39,21 @@ from modules.module_06_demo_evaluation.src.pipeline import (
 )
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+class WindowsLauncherTests(unittest.TestCase):
+    def test_launcher_prefers_cuda_and_passes_selected_device(self):
+        launcher = (PROJECT_ROOT / "start_demo_windows.bat").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("torch.cuda.is_available()", launcher)
+        self.assertIn("torch.cuda.get_device_name(0)", launcher)
+        self.assertIn('--device "%DEVICE%"', launcher)
+        self.assertIn("https://pytorch.org/get-started/locally/", launcher)
+
+
 class FakePromptAgent:
     def generate(self, scene: str, **kwargs):
         return LightingEffectAttributes(

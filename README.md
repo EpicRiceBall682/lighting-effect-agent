@@ -19,8 +19,11 @@ LoRA 生成宽幅 Raw 光效图，再映射到目标 SDL 硬件色域。核心�
 start_demo_windows.bat
 ```
 
-脚本会自动创建 `.venv`、安装依赖、询问当前进程使用的 DeepSeek API Key，
-并打开 `http://127.0.0.1:7860/`。API Key 不会写入项目文件。
+脚本会自动创建 `.venv`、安装依赖、检测并优先使用 NVIDIA CUDA、询问当前进程
+使用的 DeepSeek API Key，并打开 `http://127.0.0.1:7860/`。API Key 不会写入
+项目文件。检测到 CUDA 时会显示显卡名称并明确使用 `--device cuda`；否则会提示
+CPU 回退。如果电脑有 NVIDIA 驱动但当前 PyTorch 不支持 CUDA，脚本会给出官方
+CUDA 安装入口。
 
 如需启用模块四，把已获授权的 `SDL2_0.txt` 放到：
 
@@ -43,7 +46,9 @@ $env:DEEPSEEK_API_KEY="你的 DeepSeek API Key"
 ```
 
 第一次生成会从 Hugging Face 下载 Stable Diffusion 1.5 基础模型。没有可用的
-NVIDIA CUDA 环境时会自动使用 CPU，功能可用但生成速度会明显变慢。
+NVIDIA CUDA 环境时会自动使用 CPU，功能可用但生成速度会明显变慢。Windows
+CUDA 版 PyTorch 应根据显卡驱动从 `https://pytorch.org/get-started/locally/`
+选择合适版本，不建议盲目固定 CUDA wheel。
 
 ## macOS / Linux 快速开始
 
