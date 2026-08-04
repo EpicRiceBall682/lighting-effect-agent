@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 from pathlib import Path
+import time
 from typing import Any
 
 from PIL import Image
@@ -163,6 +164,18 @@ class GenerationResult:
     quality_retry_count: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class ConceptGenerationResult:
+    image_path: Path
+    manifest_path: Path
+    seed: int
+    width: int
+    height: int
+    steps: int
+    inference_seconds: float
+    acceleration: str
+
+
 class LightEffectGenerator:
     """Keep one pipeline in memory and generate one image at a time."""
 
@@ -180,6 +193,7 @@ class LightEffectGenerator:
         self.base_model = base_model
         self.base_model_revision = base_model_revision
         self.lora_path = Path(lora_path).expanduser().resolve()
+        self.lora_scale = float(lora_scale)
         if pipeline is None:
             self.pipeline, self.device = load_pipeline(
                 base_model=base_model,
@@ -191,6 +205,109 @@ class LightEffectGenerator:
         else:
             self.pipeline = pipeline
             self.device = selected_device or device
+
+    def generate_concept(
+        self,
+        prompt: str,
+        *,
+        output_dir: Path,
+        seed: int,
+        steps: int = 4,
+        width: int = 512,
+        height: int = 288,
+    ) -> ConceptGenerationResult:
+        """Generate one real-world concept image with a latency-oriented schedule."""
+
+        import torch
+        from diffusers import DPMSolverMultistepScheduler, LCMScheduler
+
+        if not prompt.strip():
+            raise ValueError("concept prompt cannot be empty")
+        if width % 8 or height % 8 or min(width, height) < 64:
+            raise ValueError("concept dimensions must be at least 64 and divisible by 8")
+        steps = max(2, min(int(steps), 8))
+        output_dir = Path(output_dir).expanduser().resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        original_scheduler = self.pipeline.scheduler
+        lcm_available = bool(
+            getattr(self.pipeline, "_concept_lcm_available", False)
+        )
+        acceleration = "lcm_lora_4_step" if lcm_available else "dpm_short_schedule"
+        started = time.perf_counter()
+        try:
+            if lcm_available:
+                self.pipeline.set_adapters("concept_lcm", adapter_weights=1.0)
+                self.pipeline.scheduler = LCMScheduler.from_config(
+                    original_scheduler.config
+                )
+                guidance_scale = 1.0
+            else:
+                if hasattr(self.pipeline, "disable_lora"):
+                    self.pipeline.disable_lora()
+                self.pipeline.scheduler = DPMSolverMultistepScheduler.from_config(
+                    original_scheduler.config,
+                    algorithm_type="dpmsolver++",
+                )
+                guidance_scale = 4.5
+                steps = max(6, steps)
+
+            generator = torch.Generator(device="cpu").manual_seed(int(seed))
+            output = self.pipeline(
+                prompt=prompt.strip(),
+                negative_prompt=(
+                    "text, letters, logo, watermark, deformed objects, duplicate people, "
+                    "low detail, oversaturated, underexposed"
+                ),
+                width=width,
+                height=height,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
+                generator=generator,
+            )
+            image = output.images[0].convert("RGB")
+        finally:
+            self.pipeline.scheduler = original_scheduler
+            if hasattr(self.pipeline, "enable_lora"):
+                self.pipeline.enable_lora()
+            self.pipeline.set_adapters(
+                "light_effect",
+                adapter_weights=self.lora_scale,
+            )
+
+        elapsed = time.perf_counter() - started
+        image_path = output_dir / f"concept_image_seed_{seed}.png"
+        manifest_path = output_dir / "concept_image.json"
+        image.save(image_path, format="PNG", optimize=False)
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "prompt": prompt.strip(),
+                    "seed": int(seed),
+                    "width": width,
+                    "height": height,
+                    "steps": steps,
+                    "device": self.device,
+                    "acceleration": acceleration,
+                    "inference_seconds": elapsed,
+                    "image_path": str(image_path),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return ConceptGenerationResult(
+            image_path=image_path,
+            manifest_path=manifest_path,
+            seed=int(seed),
+            width=width,
+            height=height,
+            steps=steps,
+            inference_seconds=elapsed,
+            acceleration=acceleration,
+        )
 
     def generate(
         self,

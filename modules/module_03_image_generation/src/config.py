@@ -10,7 +10,7 @@ DEFAULT_NEGATIVE_PROMPT = (
     "text, letters, logo, watermark, people, person, face, body, furniture, "
     "lamp, fixture, architecture, objects, hard edges, sharp shapes, noise, "
     "grain, isolated spots, speckles, colored dots, small blobs, clusters, "
-    "streaks, narrow beams, hard lines, low resolution, black background, dark green"
+    "streaks, narrow beams, hard lines, low resolution, black background"
 )
 
 

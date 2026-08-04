@@ -14,6 +14,13 @@ Runtime image generation uses Stable Diffusion 1.5:
 Users must review and comply with the model card and license distributed with
 that model.
 
+Fast concept-image generation can additionally load:
+
+- Adapter: `latent-consistency/lcm-lora-sdv1-5`
+
+It is downloaded during model preparation and remains subject to its own model
+card and license.
+
 ## Organizer-provided materials
 
 Organizer-provided datasets, templates, color tables, training images,

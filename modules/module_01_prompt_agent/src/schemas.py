@@ -12,25 +12,9 @@ from modules.color_vocabulary import unsupported_color_terms
 VALID_DENSITIES = frozenset({"lowest", "low", "middle", "high"})
 FORBIDDEN_EFFECT_TERMS = (
     "black",
-    "dark",
     "shadow",
-    "green",
-    "cyan",
-    "teal",
-    "turquoise",
-    "mint",
-    "lime",
-    "olive",
-    "emerald",
-    "navy",
-    "indigo",
     "黑色",
-    "暗色",
     "阴影",
-    "绿色",
-    "青色",
-    "墨绿",
-    "深蓝",
 )
 SPATIAL_EFFECT_TERMS = (
     "upper",
@@ -121,6 +105,7 @@ class LightingEffectAttributes:
     k_intensity: int
     a_intensity: int
     effect: str
+    concept_prompt: str = ""
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "LightingEffectAttributes":
@@ -131,7 +116,8 @@ class LightingEffectAttributes:
         missing = sorted(required.difference(value))
         if missing:
             raise LightingEffectValidationError(f"missing required fields: {', '.join(missing)}")
-        unexpected = sorted(set(value).difference(required))
+        optional = {"concept_prompt"}
+        unexpected = sorted(set(value).difference(required | optional))
         if unexpected:
             raise LightingEffectValidationError(
                 f"unexpected fields are not allowed: {', '.join(unexpected)}"
@@ -150,6 +136,20 @@ class LightingEffectAttributes:
             )
         if re.search(r"[\u3400-\u9fff]", effect):
             raise LightingEffectValidationError("effect must be written in English")
+
+        concept_prompt = str(value.get("concept_prompt", "")).strip()
+        if concept_prompt:
+            concept_words = re.findall(
+                r"[A-Za-z]+(?:[-'][A-Za-z]+)*", concept_prompt
+            )
+            if len(concept_words) < 8 or len(concept_words) > 80:
+                raise LightingEffectValidationError(
+                    "concept_prompt must contain 8 to 80 English words"
+                )
+            if re.search(r"[\u3400-\u9fff]", concept_prompt):
+                raise LightingEffectValidationError(
+                    "concept_prompt must be written in English"
+                )
 
         lowered = effect.casefold()
         forbidden = []
@@ -173,12 +173,6 @@ class LightingEffectAttributes:
             raise LightingEffectValidationError(
                 "effect contains artifact-prone visual terms: "
                 + ", ".join(artifact_terms)
-            )
-        if re.search(r"\bblue\b", lowered) and not re.search(
-            r"\b(?:light|pale|soft|bright|sky) blue\b", lowered
-        ):
-            raise LightingEffectValidationError(
-                "blue is allowed only when explicitly described as a light or bright blue"
             )
         unsupported_colors = unsupported_color_terms(effect)
         if unsupported_colors:
@@ -242,6 +236,7 @@ class LightingEffectAttributes:
             k_intensity=_percentage(value["k_intensity"], "k_intensity"),
             a_intensity=_percentage(value["a_intensity"], "a_intensity"),
             effect=effect,
+            concept_prompt=concept_prompt,
         )
 
     def to_dict(self) -> dict[str, Any]:

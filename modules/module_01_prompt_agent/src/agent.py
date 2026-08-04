@@ -35,6 +35,8 @@ SCENE_COLOR_REQUIREMENTS = (
     (("橙", "orange"), ("orange", "peach", "amber")),
     (("红", "red", "coral"), ("red", "coral", "pink")),
     (("白", "white"), ("ivory", "white")),
+    (("绿", "green"), ("green", "emerald", "mint", "lime", "olive")),
+    (("青", "cyan", "teal", "turquoise"), ("cyan", "teal", "turquoise")),
 )
 CLEAR_SKY_CUES = ("蓝天", "天空", "sky")
 CLOUD_CUES = ("白云", "云朵", "云彩", "cloud")

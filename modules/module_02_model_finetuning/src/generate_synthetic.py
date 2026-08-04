@@ -33,7 +33,7 @@ def _relative_luminance(rgb: np.ndarray) -> float:
 
 
 def palette_is_allowed(colors: list[np.ndarray] | tuple[np.ndarray, ...]) -> bool:
-    """Exclude green/cyan and low-value colors from the organizer's bright palette."""
+    """Accept every hue while keeping synthetic light fields sufficiently bright."""
 
     for color in colors:
         hue, saturation, value = _hsv(color)
@@ -41,8 +41,6 @@ def palette_is_allowed(colors: list[np.ndarray] | tuple[np.ndarray, ...]) -> boo
             return False
         # HSV value alone labels saturated blue as "bright" even when it looks dark.
         if _relative_luminance(color) < 0.20:
-            return False
-        if saturation >= 0.18 and 0.19 <= hue <= 0.52:
             return False
     return True
 
@@ -61,6 +59,10 @@ def color_name(rgb: np.ndarray) -> str:
         return "golden amber"
     if hue < 0.19:
         return "pale yellow"
+    if hue < 0.30:
+        return "bright green"
+    if hue < 0.52:
+        return "bright cyan"
     if hue < 0.64:
         return "light blue"
     if hue < 0.76:

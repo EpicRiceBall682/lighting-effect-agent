@@ -102,6 +102,28 @@ class FakeGenerator:
             height=config.height,
         )
 
+    def generate_concept(self, prompt, *, output_dir, seed, steps):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        array = np.zeros((288, 512, 3), dtype=np.uint8)
+        array[:, :128] = (245, 150, 190)
+        array[:, 128:256] = (245, 220, 100)
+        array[:, 256:384] = (70, 205, 105)
+        array[:, 384:] = (80, 185, 225)
+        image_path = output_dir / f"concept_image_seed_{seed}.png"
+        manifest_path = output_dir / "concept_image.json"
+        Image.fromarray(array, mode="RGB").save(image_path)
+        manifest_path.write_text(
+            json.dumps({"prompt": prompt, "steps": steps}) + "\n",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(
+            image_path=image_path,
+            manifest_path=manifest_path,
+            seed=seed,
+            steps=steps,
+            inference_seconds=0.01,
+        )
+
 
 class SamplePaletteTestCase(unittest.TestCase):
     @classmethod
@@ -412,10 +434,9 @@ class PipelineTests(SamplePaletteTestCase):
                 pipeline.run("足够长的场景描述", float("nan"), 370)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
-    def test_green_scene_notice_explains_palette_translation(self):
+    def test_green_scene_requires_no_palette_translation(self):
         notice = scene_palette_notice("蓝天白云大草原")
-        self.assertIn("不支持纯绿色", notice)
-        self.assertIn("保留开阔", notice)
+        self.assertEqual(notice, "")
 
     def test_missing_sdl_table_uses_explicit_preview_mode(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -497,7 +518,47 @@ class PipelineTests(SamplePaletteTestCase):
             report = json.loads(result.report_path.read_text(encoding="utf-8"))
             self.assertEqual(result.prompt, edited)
             self.assertEqual(report["module_01_prompt_source"], "user_edited")
-            self.assertTrue(result.palette_notice)
+            self.assertEqual(result.palette_notice, "")
+
+    def test_fast_mode_returns_concept_and_green_light_within_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LightingDemoPipeline(
+                sdl_path=Path(directory) / "missing_sdl.txt",
+                output_root=Path(directory) / "outputs",
+                generator_factory=FakeGenerator,
+                fast_mode=True,
+                time_budget_seconds=6.0,
+            )
+            result = pipeline.run(
+                "清晨花海，粉色、黄色、绿色和蓝色，清新自然",
+                1220,
+                370,
+                seed=42,
+                steps=4,
+            )
+            self.assertTrue(result.concept_image_path.is_file())
+            self.assertTrue(result.sdl_preview_path.is_file())
+            self.assertIn("bright green", result.prompt)
+            self.assertTrue(result.deadline_met)
+            self.assertLess(result.timings["total_seconds"], 6.0)
+            report = json.loads(result.report_path.read_text(encoding="utf-8"))
+            self.assertNotEqual(
+                report["concept_image"]["path"],
+                report["concept_image"]["source_path"],
+            )
+            concept_manifest = json.loads(
+                result.concept_manifest_path.read_text(encoding="utf-8")
+            )
+            self.assertGreater(
+                concept_manifest["harmonization"][
+                    "chroma_error_reduction_fraction"
+                ],
+                0.75,
+            )
+            self.assertEqual(
+                report["module_03"]["prompt_color_guidance"]["final_colors"],
+                [[239, 177, 203], [255, 226, 70], [74, 214, 112], [72, 156, 235]],
+            )
 
 
 class AppTests(SamplePaletteTestCase):

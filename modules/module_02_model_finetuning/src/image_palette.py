@@ -25,7 +25,7 @@ class PaletteAudit:
 def audit_rgb_pixels(
     image: np.ndarray,
     *,
-    max_forbidden_hue_fraction: float = 0.005,
+    max_forbidden_hue_fraction: float = 1.0,
     max_dark_pixel_fraction: float = 0.01,
     max_isolated_chroma_fraction: float = 0.005,
 ) -> PaletteAudit:
@@ -53,10 +53,7 @@ def audit_rgb_pixels(
     hue[blue_max] = (red[blue_max] - green[blue_max]) / delta[blue_max] + 4
     hue /= 6.0
 
-    # 0.19–0.52 spans yellow-green, green and cyan. Low-saturation ivory/white
-    # pixels are ignored because their hue is visually insignificant.
-    # A 0.12 saturation floor still ignores nearly neutral ivory/white, while
-    # catching the visibly pale green band produced by blue-to-yellow blends.
+    # Kept as a legacy diagnostic field; these hues are no longer rejected.
     forbidden_hue = (saturation >= 0.12) & (hue >= 0.19) & (hue <= 0.52)
 
     linear = np.where(
@@ -101,8 +98,7 @@ def audit_rgb_pixels(
         dark_pixel_fraction=dark_fraction,
         isolated_chroma_fraction=isolated_fraction,
         allowed=(
-            forbidden_fraction <= max_forbidden_hue_fraction
-            and dark_fraction <= max_dark_pixel_fraction
+            dark_fraction <= max_dark_pixel_fraction
             and isolated_fraction <= max_isolated_chroma_fraction
         ),
     )

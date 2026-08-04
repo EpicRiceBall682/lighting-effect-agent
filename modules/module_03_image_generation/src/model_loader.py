@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 from typing import Any
 
 
 DEFAULT_BASE_MODEL = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 DEFAULT_BASE_MODEL_REVISION = "451f4fe16113bff5a5d2269ed5ad43b0592e9a14"
 DEFAULT_LORA_PATH = Path(__file__).resolve().parents[1] / "weights" / "light_effect_lora.safetensors"
+DEFAULT_CONCEPT_LCM_LORA = "latent-consistency/lcm-lora-sdv1-5"
 
 
 class ModelLoadError(RuntimeError):
@@ -68,11 +70,33 @@ def load_pipeline(
             adapter_name="light_effect",
         )
         pipeline.set_adapters("light_effect", adapter_weights=lora_scale)
-        pipeline.enable_attention_slicing()
-        if hasattr(pipeline, "vae") and hasattr(pipeline.vae, "enable_slicing"):
-            pipeline.vae.enable_slicing()
-        elif hasattr(pipeline, "enable_vae_slicing"):
-            pipeline.enable_vae_slicing()
+        concept_lcm = os.getenv(
+            "CONCEPT_LCM_LORA",
+            DEFAULT_CONCEPT_LCM_LORA,
+        ).strip()
+        pipeline._concept_lcm_available = False
+        pipeline._concept_lcm_error = ""
+        if concept_lcm:
+            try:
+                pipeline.load_lora_weights(
+                    concept_lcm,
+                    adapter_name="concept_lcm",
+                )
+                pipeline._concept_lcm_available = True
+            except Exception as exc:
+                # The full-quality path remains usable offline. The concept generator
+                # falls back to a short DPM schedule and reports this condition.
+                pipeline._concept_lcm_error = str(exc)
+        if selected_device == "cuda":
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.set_float32_matmul_precision("high")
+        else:
+            # Slicing lowers memory pressure on CPU/MPS, but adds latency on CUDA.
+            pipeline.enable_attention_slicing()
+            if hasattr(pipeline, "vae") and hasattr(pipeline.vae, "enable_slicing"):
+                pipeline.vae.enable_slicing()
+            elif hasattr(pipeline, "enable_vae_slicing"):
+                pipeline.enable_vae_slicing()
         pipeline = pipeline.to(selected_device)
     except Exception as exc:
         raise ModelLoadError(f"failed to load base model or LoRA: {exc}") from exc

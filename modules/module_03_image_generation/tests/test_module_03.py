@@ -7,6 +7,10 @@ import unittest
 
 from modules.module_03_image_generation.src.cli import _dimensions, build_parser, prompt_from_json
 from modules.module_03_image_generation.src.config import GenerationConfig
+from modules.module_03_image_generation.src.concept_palette import (
+    build_concept_palette_plan,
+    harmonize_concept_image,
+)
 from modules.module_03_image_generation.src.generator import (
     attribute_prompt_fragments,
     build_effective_prompt,
@@ -78,6 +82,39 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("broad three-stop horizontal gradient", effective)
         self.assertIn("soft focal contrast", effective)
         self.assertEqual(len(fragments), 2)
+
+    def test_explicit_colors_override_missing_concept_hues(self):
+        from PIL import Image
+
+        plan, report = build_concept_palette_plan(
+            Image.new("RGB", (256, 144), (80, 190, 95)),
+            "soft pink left, bright yellow, bright green, and bright blue right",
+        )
+
+        expected = ((239, 177, 203), (255, 226, 70), (74, 214, 112), (72, 156, 235))
+        self.assertEqual([stop.color_name for stop in plan.stops], [
+            "soft pink", "bright yellow", "bright green", "bright blue"
+        ])
+        for stop, target in zip(plan.stops, expected):
+            self.assertLessEqual(max(abs(a - b) for a, b in zip(stop.rgb, target)), 18)
+        self.assertEqual(report["requested_color_weight"], 1.0)
+
+    def test_concept_harmonization_reduces_palette_error_and_keeps_luminance(self):
+        import numpy as np
+        from PIL import Image
+
+        source = Image.new("RGB", (256, 144), (250, 10, 250))
+        plan, _report = build_concept_palette_plan(
+            source,
+            "soft pink left, bright yellow, bright green, and bright blue right",
+        )
+        harmonized, report = harmonize_concept_image(source, plan)
+        source_luma = np.asarray(source.convert("YCbCr"), dtype=np.int16)[..., 0]
+        result_luma = np.asarray(harmonized.convert("YCbCr"), dtype=np.int16)[..., 0]
+
+        self.assertGreater(report["chroma_error_reduction_fraction"], 0.75)
+        self.assertLessEqual(np.abs(source_luma - result_luma).max(), 2)
+        self.assertEqual(harmonized.size, source.size)
 
     def test_tokenizer_limit_drops_optional_controls_instead_of_truncating(self):
         class FakeTokenizer:
@@ -242,7 +279,10 @@ class QualityTests(unittest.TestCase):
         self.assertEqual(plan.stops[2].color_name, "bright blue")
         rendered = render_base_gradient(plan, width=320, height=96)
         quality = analyze_image_quality(rendered)
-        self.assertLessEqual(quality.forbidden_hue_fraction, 0.005)
+        self.assertFalse(
+            quality.forbidden_hue_fraction
+            > 0.0 and "green" in " ".join(quality.warnings).lower()
+        )
         self.assertGreater(rendered.getpixel((319, 48))[2], 200)
 
     def test_dominant_modifier_does_not_leak_to_the_previous_color(self):
@@ -261,14 +301,14 @@ class QualityTests(unittest.TestCase):
         self.assertEqual(plan.stops[0].role, "secondary")
         self.assertEqual(plan.stops[1].role, "primary")
 
-    def test_unsupported_blue_term_fails_instead_of_becoming_single_color(self):
+    def test_unknown_blue_modifier_falls_back_to_blue_family(self):
         from PIL import Image
 
-        with self.assertRaisesRegex(ValueError, "cannot parse: cerulean blue"):
-            build_structured_gradient_plan(
-                "Pale yellow on the left and dominant cerulean blue across the right.",
-                Image.new("RGB", (96, 64), (120, 120, 120)),
-            )
+        plan = build_structured_gradient_plan(
+            "Pale yellow on the left and dominant cerulean blue across the right.",
+            Image.new("RGB", (96, 64), (120, 120, 120)),
+        )
+        self.assertIn("blue", plan.dominant_color)
 
     def test_structured_renderer_rejects_lora_chroma_but_keeps_weak_luminance(self):
         import numpy as np
@@ -413,7 +453,7 @@ class QualityTests(unittest.TestCase):
 
         report = analyze_image_quality(Image.new("RGB", (64, 64), (80, 220, 120)))
         self.assertGreater(report.forbidden_hue_fraction, 0.9)
-        self.assertTrue(report.warnings)
+        self.assertFalse(report.warnings)
 
     def test_isolated_chroma_spot_is_detected_and_reduced(self):
         import numpy as np
@@ -546,7 +586,7 @@ class QualityTests(unittest.TestCase):
 
             def __call__(self, **kwargs):
                 self.calls += 1
-                color = (80, 220, 120) if self.calls == 1 else (255, 180, 100)
+                color = (0, 0, 0) if self.calls == 1 else (255, 180, 100)
                 return SimpleNamespace(images=[Image.new("RGB", (64, 64), color)])
 
         with tempfile.TemporaryDirectory() as directory:
@@ -626,7 +666,7 @@ class QualityTests(unittest.TestCase):
             def __call__(self, **kwargs):
                 self.calls += 1
                 return SimpleNamespace(
-                    images=[Image.new("RGB", (64, 64), (80, 220, 120))]
+                    images=[Image.new("RGB", (64, 64), (0, 0, 0))]
                 )
 
         with tempfile.TemporaryDirectory() as directory:

@@ -190,7 +190,7 @@ def _format_metrics(
 def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
     """Create the UI; dependency injection keeps construction testable."""
 
-    pipeline = pipeline or LightingDemoPipeline()
+    pipeline = pipeline or LightingDemoPipeline(fast_mode=True)
     startup_status = "### 等待生成\n填写左侧信息后点击“生成完整光效”。"
     if not pipeline.sdl_path.is_file():
         startup_status += (
@@ -276,6 +276,8 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                     "请以模块三 Raw 评估设计色，"
                     "以模块四结果评估实际硬件可实现效果。"
                 )
+            if result.sdl_notice:
+                status += f"\n\n⚠️ {result.sdl_notice}"
         if result.artifact_cleanup.get("applied"):
             status += "\n\n模块三已执行局部色斑抑制与轻度平滑。"
         pattern_status = str(result.pattern_report.get("quality_status", ""))
@@ -298,16 +300,26 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                 status += " 重试后仍较相似，建议进一步调整英文提示词的构图结构。"
         if result.sdl_retry_count:
             status += "\n\n首次 SDL 色域质量未通过，系统已更换种子并自动恢复。"
+        total_seconds = float(result.timings.get("total_seconds", 0.0))
+        if total_seconds:
+            if result.deadline_met:
+                status += f"\n\n⚡ 双图已在 `{total_seconds:.2f}` 秒内完成。"
+            else:
+                status += (
+                    f"\n\n⚠️ 本次双图耗时 `{total_seconds:.2f}` 秒，超过 "
+                    f"`{pipeline.time_budget_seconds:.1f}` 秒目标；详见性能报告。"
+                )
         palette_notice = (
             f"⚠️ **色彩转换提示：** {result.palette_notice}"
             if result.palette_notice
-            else "✅ 未检测到需要特别说明的禁用色场景转换。"
+            else "✅ 支持绿色、青色及其他色相；最终硬件范围由 SDL 映射处理。"
         )
         return (
             status,
             palette_notice,
             result.prompt,
             result.attributes,
+            str(result.concept_image_path),
             str(result.raw_image_path),
             str(result.themed_image_path),
             str(result.sdl_preview_path),
@@ -382,12 +394,12 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                 """
                 <section class="hero">
                   <div class="eyebrow">AI Lighting Lab</div>
-                  <h1>一句中文，生成可落地的光效。</h1>
-                  <p>输入场景和灯具尺寸，系统会先确定主色与横向渐变，再从 LoRA 中保留少量低频亮度质感；随后完成主题增强与 SDL 色域处理，并保留全部中间结果。</p>
+                  <h1>一句中文，同时生成概念意象与可落地光色。</h1>
+                  <p>系统先从输入建立共享色彩蓝图，再生成带实体和空间的概念图；概念图与宽幅渐变使用同一组颜色和横向顺序，随后完成主题增强与 SDL 色域处理。</p>
                   <div class="step-strip">
-                    <span class="step-chip">01 中文场景 → 英文光效提示词</span>
-                    <span class="step-chip">02 模块二 LoRA 权重</span>
-                    <span class="step-chip">03 主渐变＋弱 LoRA 光感</span>
+                    <span class="step-chip">01 中文场景 → 共享视觉规格</span>
+                    <span class="step-chip">02 快速实体概念图</span>
+                    <span class="step-chip">03 共享色彩协调 → 宽幅渐变</span>
                     <span class="step-chip">05 低频主题光场增强</span>
                     <span class="step-chip">04 SDL 物理色域映射</span>
                   </div>
@@ -424,10 +436,10 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                             minimum=0,
                         )
                         steps = gr.Slider(
-                            label="生成步数",
-                            minimum=10,
-                            maximum=60,
-                            value=30,
+                            label="概念图快速推理步数",
+                            minimum=2,
+                            maximum=8,
+                            value=4,
                             step=1,
                         )
                         fixed_seed = gr.Checkbox(
@@ -456,7 +468,7 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                         elem_classes=["generate-btn"],
                     )
                     gr.Markdown(
-                        "<span class='small-note'>首次生成需要加载本地模型，之后会复用模型，速度会更快。</span>"
+                        "<span class='small-note'>模型在网页启动前完成加载；目标是在 6 秒内同时输出概念图和光色图。</span>"
                     )
 
                 with gr.Column(scale=7):
@@ -465,7 +477,7 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                         elem_classes=["panel", "status-card"],
                     )
                     palette_notice = gr.Markdown(
-                        "色彩受赛题配色和 SDL 硬件色域约束；如输入草原、森林等场景，系统会在这里说明替代方式。"
+                        "支持绿色、青色及其他色相；概念图和光色图共享颜色与顺序，再由 SDL 处理硬件边界。"
                     )
                     prompt = gr.Textbox(
                         label="模块一 · 英文光效提示词（可编辑）",
@@ -486,29 +498,39 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                         open=False,
                     )
 
-            gr.Markdown("## 主渐变 Raw / 主题增强 / SDL 物理约束结果")
+            gr.Markdown("## 概念意象与最终光色")
             with gr.Row(equal_height=True):
-                raw_image = gr.Image(
-                    label="模块三 · 参考风格主渐变 Raw",
-                    type="filepath",
-                    interactive=False,
-                    buttons=["download", "fullscreen"],
-                    elem_classes=["result-image"],
-                )
-                themed_image = gr.Image(
-                    label="模块五 · 低频主题增强",
+                concept_image = gr.Image(
+                    label="实体场景概念图",
                     type="filepath",
                     interactive=False,
                     buttons=["download", "fullscreen"],
                     elem_classes=["result-image"],
                 )
                 sdl_preview = gr.Image(
-                    label="模块四 · SDL 视觉预览（未配置时显示模块五结果）",
+                    label="最终宽幅光色图",
                     type="filepath",
                     interactive=False,
                     buttons=["download", "fullscreen"],
                     elem_classes=["result-image"],
                 )
+
+            with gr.Accordion("查看生成与硬件工程输出", open=False):
+                with gr.Row(equal_height=True):
+                    raw_image = gr.Image(
+                        label="模块三 · 参考风格主渐变 Raw",
+                        type="filepath",
+                        interactive=False,
+                        buttons=["download", "fullscreen"],
+                        elem_classes=["result-image"],
+                    )
+                    themed_image = gr.Image(
+                        label="模块五 · 低频主题增强",
+                        type="filepath",
+                        interactive=False,
+                        buttons=["download", "fullscreen"],
+                        elem_classes=["result-image"],
+                    )
 
             with gr.Row(equal_height=False):
                 metrics = gr.JSON(label="关键质量指标", open=True)
@@ -555,6 +577,7 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                 palette_notice,
                 prompt,
                 attributes,
+                concept_image,
                 raw_image,
                 themed_image,
                 sdl_preview,
@@ -589,6 +612,7 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                 palette_notice,
                 prompt,
                 attributes,
+                concept_image,
                 raw_image,
                 themed_image,
                 sdl_preview,
@@ -611,6 +635,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--server-name", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--device", choices=("auto", "mps", "cuda", "cpu"), default="auto")
+    parser.add_argument(
+        "--generation-mode",
+        choices=("fast", "quality"),
+        default="fast",
+        help="fast returns a concept image plus a concept-derived light field",
+    )
+    parser.add_argument("--time-budget-seconds", type=float, default=6.0)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument(
         "--sdl-path",
@@ -639,7 +670,10 @@ def main(argv: list[str] | None = None) -> None:
         device=args.device,
         sdl_path=args.sdl_path,
         allow_missing_sdl=not args.require_sdl,
+        fast_mode=args.generation_mode == "fast",
+        time_budget_seconds=args.time_budget_seconds,
     )
+    pipeline.warmup()
     demo = build_demo(pipeline)
     theme = gr.themes.Soft(
         primary_hue="orange",

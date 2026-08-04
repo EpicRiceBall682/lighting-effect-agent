@@ -19,6 +19,7 @@ from modules.module_01_prompt_agent.src.prompt_builder import (
     build_system_prompt,
     build_user_prompt,
 )
+from modules.module_01_prompt_agent.src.fast_compiler import FastPromptCompiler
 from modules.module_01_prompt_agent.src.schemas import (
     LightingEffectAttributes,
     LightingEffectValidationError,
@@ -55,7 +56,7 @@ class SchemaTests(unittest.TestCase):
         parsed = LightingEffectAttributes.from_mapping(raw)
         self.assertEqual(parsed.m_intensity, 70)
 
-    def test_rejects_forbidden_dark_tone(self):
+    def test_allows_dark_hue_modifiers(self):
         raw = dict(
             VALID_RESPONSE,
             effect=(
@@ -64,21 +65,21 @@ class SchemaTests(unittest.TestCase):
                 "illumination, and a romantic welcoming atmosphere throughout the panel."
             ),
         )
-        with self.assertRaises(LightingEffectValidationError):
-            LightingEffectAttributes.from_mapping(raw)
+        self.assertIn("dark pink", LightingEffectAttributes.from_mapping(raw).effect)
 
-    def test_rejects_forbidden_green_or_cyan_tone(self):
-        for color in ("green", "cyan", "teal"):
+    def test_allows_green_cyan_and_teal(self):
+        for color in ("bright green", "bright cyan", "teal"):
             raw = dict(
                 VALID_RESPONSE,
                 effect=(
                     f"Wide panoramic abstract light texture with a bright {color} gradient "
                     "across the upper area, a luminous center, diffused bloom, evenly bright "
-                    "illumination, and a clean translucent welcoming atmosphere throughout."
+                    "illumination, and a clean translucent welcoming atmosphere throughout "
+                    "the continuous panel."
                 ),
             )
-            with self.subTest(color=color), self.assertRaises(LightingEffectValidationError):
-                LightingEffectAttributes.from_mapping(raw)
+            with self.subTest(color=color):
+                self.assertIn(color, LightingEffectAttributes.from_mapping(raw).effect)
 
     def test_rejects_unexpected_json_fields(self):
         raw = dict(VALID_RESPONSE, explanation="extra model commentary")
@@ -96,7 +97,7 @@ class SchemaTests(unittest.TestCase):
         with self.assertRaises(LightingEffectValidationError):
             LightingEffectAttributes.from_mapping(raw)
 
-    def test_allows_light_blue_but_rejects_unspecified_blue(self):
+    def test_allows_light_and_unspecified_blue(self):
         allowed = dict(
             VALID_RESPONSE,
             effect=(
@@ -114,8 +115,7 @@ class SchemaTests(unittest.TestCase):
             ),
         )
         self.assertIn("light blue", LightingEffectAttributes.from_mapping(allowed).effect)
-        with self.assertRaises(LightingEffectValidationError):
-            LightingEffectAttributes.from_mapping(rejected)
+        self.assertIn("blue", LightingEffectAttributes.from_mapping(rejected).effect)
 
     def test_bright_blue_is_supported_by_the_shared_renderer_vocabulary(self):
         raw = dict(
@@ -213,11 +213,20 @@ class PromptTests(unittest.TestCase):
         self.assertIn("30 to 50 English words", prompt)
         self.assertIn("dominant color", prompt)
         self.assertIn("left-to-right horizontal gradient", prompt)
-        self.assertIn("two or three named colors", prompt)
+        self.assertIn("two to four named colors", prompt)
         self.assertIn("vertical axis uniform", prompt)
         self.assertIn("Energetic disco", prompt)
         self.assertIn("Do not introduce mist", prompt)
         self.assertTrue(all(name in prompt for name in SUPPORTED_COLOR_NAMES))
+        self.assertIn("concept_prompt", prompt)
+
+    def test_fast_compiler_preserves_green_and_builds_concept_prompt(self):
+        result = FastPromptCompiler().generate(
+            "清晨花海，粉色、黄色、绿色和蓝色，清新自然"
+        )
+        self.assertIn("bright green", result.effect)
+        self.assertIn("flowers", result.concept_prompt)
+        self.assertIn("bright green", result.concept_prompt)
 
     def test_rejects_caption_without_spatial_structure(self):
         raw = dict(

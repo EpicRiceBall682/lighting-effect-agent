@@ -14,7 +14,9 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 from typing import Any, Callable, Iterator, Sequence
 from uuid import uuid4
 import zipfile
@@ -24,17 +26,30 @@ from PIL import Image
 from PIL import ImageDraw
 
 from modules.module_01_prompt_agent.src.agent import LightingPromptAgent
+from modules.module_01_prompt_agent.src.fast_compiler import FastPromptCompiler
 from modules.module_01_prompt_agent.src.schemas import LightingEffectAttributes
 from modules.module_03_image_generation.src.config import (
     DEFAULT_NEGATIVE_PROMPT,
     GenerationConfig,
 )
-from modules.module_03_image_generation.src.generator import LightEffectGenerator
+from modules.module_03_image_generation.src.concept_palette import (
+    build_concept_palette_plan,
+    harmonize_concept_image,
+    render_shared_palette_gradient,
+)
+from modules.module_03_image_generation.src.generator import (
+    GenerationResult,
+    LightEffectGenerator,
+)
 from modules.module_03_image_generation.src.image_geometry import dimensions_from_fixture
 from modules.module_03_image_generation.src.model_loader import (
     DEFAULT_BASE_MODEL,
     DEFAULT_BASE_MODEL_REVISION,
     DEFAULT_LORA_PATH,
+)
+from modules.module_03_image_generation.src.quality import analyze_image_quality
+from modules.module_03_image_generation.src.structured_gradient import (
+    StructuredGradientPlan,
 )
 from modules.module_04_gamut_mapping.src.mapper import GamutMapper
 from modules.module_04_gamut_mapping.src.sdl_palette import (
@@ -46,18 +61,6 @@ from modules.module_05_pattern_generation.src.generator import PatternGenerator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "demo"
-GREEN_SCENE_CUES = (
-    "绿色",
-    "草原",
-    "草地",
-    "森林",
-    "树林",
-    "绿植",
-    "植被",
-    "green",
-    "grass",
-    "forest",
-)
 SIMILARITY_DIFFERENCE_THRESHOLD = 0.03
 SIMILARITY_RETRY_SEED_OFFSET = 104729
 SDL_RETRY_SEED_OFFSET = 32452843
@@ -91,15 +94,8 @@ def load_macos_launchctl_api_key() -> bool:
 
 
 def scene_palette_notice(scene: str) -> str:
-    """Explain organizer/hardware color translation without discarding semantics."""
+    """All requested hues are accepted; SDL mapping handles hardware limits later."""
 
-    lowered = scene.casefold()
-    if any(cue in lowered for cue in GREEN_SCENE_CUES):
-        return (
-            "输入包含绿色或植被意象。赛题配色和 SDL 硬件色域不支持纯绿色；"
-            "系统会保留开阔、上下层次和自然氛围，改用浅蓝、象牙白、"
-            "淡黄或暖粉表达，而不会把场景结构直接删除。"
-        )
     return ""
 
 
@@ -137,6 +133,8 @@ class DemoPipelineResult:
     run_dir: Path
     prompt: str
     attributes: dict[str, Any]
+    concept_image_path: Path
+    concept_manifest_path: Path
     raw_image_path: Path
     themed_image_path: Path
     sdl_preview_path: Path
@@ -164,6 +162,8 @@ class DemoPipelineResult:
     sdl_retry_count: int
     sdl_available: bool
     sdl_notice: str
+    timings: dict[str, float]
+    deadline_met: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,8 +269,11 @@ class LightingDemoPipeline:
         generator_factory: Callable[..., Any] = LightEffectGenerator,
         mapper_factory: Callable[[SDLPalette], Any] = GamutMapper,
         pattern_generator: Any | None = None,
+        fast_prompt_compiler: Any | None = None,
         lora_scale: float = 0.8,
         allow_missing_sdl: bool = True,
+        fast_mode: bool = False,
+        time_budget_seconds: float = 6.0,
     ) -> None:
         self.output_root = Path(output_root).expanduser().resolve()
         self.device = device
@@ -282,14 +285,91 @@ class LightingDemoPipeline:
         self.generator_factory = generator_factory
         self.mapper_factory = mapper_factory
         self.pattern_generator = pattern_generator or PatternGenerator()
+        self.fast_prompt_compiler = fast_prompt_compiler or FastPromptCompiler()
         self.lora_scale = lora_scale
         self.allow_missing_sdl = bool(allow_missing_sdl)
+        self.fast_mode = bool(fast_mode)
+        self.time_budget_seconds = float(time_budget_seconds)
         self._generator: Any | None = None
         self._mapper: Any | None = None
         self._run_lock = threading.Lock()
         self._previous_image: Image.Image | None = None
         self._previous_scene: str | None = None
         self._previous_prompt: str | None = None
+
+    def warmup(self) -> None:
+        """Load models, the fast concept adapter, and SDL data before the first click."""
+
+        generator = self._get_generator()
+        self._get_mapper()
+        if self.fast_mode and hasattr(generator, "generate_concept"):
+            with tempfile.TemporaryDirectory(prefix="lighting-concept-warmup-") as directory:
+                generator.generate_concept(
+                    "A bright modern interior with plants, furniture, natural depth, "
+                    "and balanced cinematic ambient light, no text or logos.",
+                    output_dir=Path(directory),
+                    seed=1,
+                    steps=2,
+                    width=256,
+                    height=144,
+                )
+
+    def _generate_fast_light(
+        self,
+        *,
+        shared_plan: StructuredGradientPlan,
+        palette_report: dict[str, object],
+        output_dir: Path,
+        config: GenerationConfig,
+        source_attributes: dict[str, Any],
+    ) -> GenerationResult:
+        image, color_guidance = render_shared_palette_gradient(
+            shared_plan,
+            palette_report,
+            width=config.width,
+            height=config.height,
+        )
+        quality = analyze_image_quality(image)
+        image_path = output_dir / f"raw_light_effect_seed_{config.seed}.png"
+        manifest_path = image_path.with_suffix(".json")
+        image.save(image_path, format="PNG", optimize=False)
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "prompt": source_attributes.get("effect", ""),
+                    "effective_prompt": source_attributes.get("effect", ""),
+                    "base_model": self.base_model,
+                    "base_model_revision": DEFAULT_BASE_MODEL_REVISION,
+                    "lora_path": str(self.lora_path),
+                    "lora_sha256": _sha256_file(self.lora_path),
+                    "device": self.device,
+                    "module_01_attributes": source_attributes,
+                    "generation_mode": "concept_palette_fast",
+                    "prompt_color_guidance": color_guidance,
+                    "artifact_cleanup": {"applied": False},
+                    "quality_status": "accepted",
+                    "quality_retry_count": 0,
+                    "quality": quality.to_dict(),
+                    "seed": config.seed,
+                    "width": config.width,
+                    "height": config.height,
+                    "num_inference_steps": 0,
+                    "image_path": str(image_path),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return GenerationResult(
+            image_path=image_path,
+            manifest_path=manifest_path,
+            seed=config.seed,
+            width=config.width,
+            height=config.height,
+            quality_retry_count=0,
+        )
 
     def _get_prompt_agent(self) -> Any:
         if self.prompt_agent is None:
@@ -426,6 +506,8 @@ class LightingDemoPipeline:
     ) -> DemoPipelineResult:
         """Run modules 1, 3, and 4 and persist every intermediate artifact."""
 
+        pipeline_started = time.perf_counter()
+        timings: dict[str, float] = {}
         values = self._validate_inputs(
             scene, width_mm, height_mm, space_size_m2, seed, steps
         )
@@ -443,6 +525,7 @@ class LightingDemoPipeline:
         )
         with self._run_lock, self._managed_run_dir() as run_dir:
             palette_notice = scene_palette_notice(scene)
+            stage_started = time.perf_counter()
             if prompt_override is not None:
                 self._notify(progress, 0.08, "模块一：正在校验编辑后的提示词")
                 if not attributes_override:
@@ -453,7 +536,12 @@ class LightingDemoPipeline:
                 prompt_source = "user_edited"
             else:
                 self._notify(progress, 0.08, "模块一：正在理解中文场景")
-                attributes = self._get_prompt_agent().generate(
+                prompt_compiler = (
+                    self.fast_prompt_compiler
+                    if self.fast_mode
+                    else self._get_prompt_agent()
+                )
+                attributes = prompt_compiler.generate(
                     scene,
                     hardware_width_mm=width_mm,
                     hardware_height_mm=height_mm,
@@ -461,7 +549,8 @@ class LightingDemoPipeline:
                     forbidden_effects=forbidden_prompts,
                     forbidden_design_effects=forbidden_prompt_designs,
                 )
-                prompt_source = "deepseek"
+                prompt_source = "local_fast_compiler" if self.fast_mode else "deepseek"
+            timings["prompt_seconds"] = time.perf_counter() - stage_started
             attributes_dict = attributes.to_dict()
             prompt_json_path = run_dir / "module_01_prompt.json"
             prompt_json_path.write_text(
@@ -479,17 +568,84 @@ class LightingDemoPipeline:
                 negative_prompt=DEFAULT_NEGATIVE_PROMPT,
             )
 
-            self._notify(
-                progress,
-                0.30,
-                "模块三：正在生成主渐变并提取弱 LoRA 亮度纹理",
-            )
-            generation = self._get_generator().generate(
-                attributes.effect,
-                output_dir=run_dir,
-                config=config,
-                source_attributes=attributes_dict,
-            )
+            generator = self._get_generator()
+            if self.fast_mode:
+                self._notify(progress, 0.20, "正在快速生成实体场景概念图")
+                stage_started = time.perf_counter()
+                concept_prompt = attributes.concept_prompt or (
+                    "Cinematic real-world interior scene with recognizable objects, "
+                    "people, realistic materials, natural depth, and atmospheric "
+                    f"illumination inspired by {attributes.effect}"
+                )
+                concept = generator.generate_concept(
+                    concept_prompt,
+                    output_dir=run_dir,
+                    seed=effective_seed,
+                    steps=steps,
+                )
+                timings["concept_seconds"] = time.perf_counter() - stage_started
+                with Image.open(concept.image_path) as opened:
+                    source_concept_image = opened.convert("RGB").copy()
+                stage_started = time.perf_counter()
+                shared_plan, palette_report = build_concept_palette_plan(
+                    source_concept_image,
+                    attributes.effect,
+                )
+                concept_image, harmonization_report = harmonize_concept_image(
+                    source_concept_image,
+                    shared_plan,
+                )
+                concept_source_image_path = concept.image_path
+                concept_image_path = run_dir / (
+                    f"concept_image_harmonized_seed_{effective_seed}.png"
+                )
+                concept_image.save(concept_image_path, format="PNG", optimize=False)
+                concept_manifest_path = concept.manifest_path
+                concept_details = json.loads(
+                    concept_manifest_path.read_text(encoding="utf-8")
+                )
+                concept_details.update(
+                    {
+                        "source_image_path": str(concept_source_image_path),
+                        "display_image_path": str(concept_image_path),
+                        "shared_palette": palette_report,
+                        "harmonization": harmonization_report,
+                    }
+                )
+                concept_manifest_path.write_text(
+                    json.dumps(concept_details, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                timings["concept_harmonization_seconds"] = (
+                    time.perf_counter() - stage_started
+                )
+                self._notify(progress, 0.56, "正在复用共享色彩蓝图生成光色图")
+                stage_started = time.perf_counter()
+                generation = self._generate_fast_light(
+                    shared_plan=shared_plan,
+                    palette_report=palette_report,
+                    output_dir=run_dir,
+                    config=config,
+                    source_attributes=attributes_dict,
+                )
+                timings["light_field_seconds"] = time.perf_counter() - stage_started
+            else:
+                self._notify(
+                    progress,
+                    0.30,
+                    "模块三：正在生成主渐变并提取弱 LoRA 亮度纹理",
+                )
+                stage_started = time.perf_counter()
+                generation = generator.generate(
+                    attributes.effect,
+                    output_dir=run_dir,
+                    config=config,
+                    source_attributes=attributes_dict,
+                )
+                timings["light_field_seconds"] = time.perf_counter() - stage_started
+                concept_image_path = generation.image_path
+                concept_source_image_path = generation.image_path
+                concept_manifest_path = generation.manifest_path
             effective_seed = generation.seed
 
             with Image.open(generation.image_path) as opened:
@@ -514,6 +670,7 @@ class LightingDemoPipeline:
                 if (
                     initial_difference < SIMILARITY_DIFFERENCE_THRESHOLD
                     and not fixed_seed
+                    and not self.fast_mode
                 ):
                     retry_count = 1
                     retry_seed = (
@@ -555,6 +712,10 @@ class LightingDemoPipeline:
             generation_details = json.loads(
                 generation.manifest_path.read_text(encoding="utf-8")
             )
+            if not self.fast_mode:
+                concept_image_path = generation.image_path
+                concept_source_image_path = generation.image_path
+                concept_manifest_path = generation.manifest_path
             raw_quality = dict(generation_details.get("quality", {}))
             artifact_cleanup = dict(
                 generation_details.get("artifact_cleanup", {})
@@ -564,6 +725,7 @@ class LightingDemoPipeline:
             )
 
             self._notify(progress, 0.73, "模块五：正在进行低频主题光场增强")
+            stage_started = time.perf_counter()
             pattern = self.pattern_generator.generate(
                 current_image,
                 scene=scene,
@@ -575,8 +737,10 @@ class LightingDemoPipeline:
             )
             with Image.open(pattern.image_path) as opened:
                 mapping_image = opened.convert("RGB").copy()
+            timings["pattern_seconds"] = time.perf_counter() - stage_started
 
             mapper = self._get_mapper()
+            stage_started = time.perf_counter()
             if mapper is None:
                 self._notify(
                     progress,
@@ -587,6 +751,7 @@ class LightingDemoPipeline:
             else:
                 self._notify(progress, 0.78, "模块四：正在进行 SDL 色域映射")
                 mapped = mapper.map_image(mapping_image, method="smooth")
+            timings["sdl_seconds"] = time.perf_counter() - stage_started
             sdl_available = bool(getattr(mapped, "available", True))
             sdl_notice = (
                 ""
@@ -597,6 +762,12 @@ class LightingDemoPipeline:
                     "不代表硬件可实现色域。"
                 )
             )
+            if sdl_available and self.fast_mode and mapped.quality_failures:
+                sdl_notice = (
+                    "快速模式未执行耗时重试；视觉预览已返回，严格控制图仍保持 "
+                    "SDL 表成员合规。建议在质量模式复核："
+                    + ", ".join(mapped.quality_failures)
+                )
             sdl_attempts = [
                 {
                     "attempt": 0,
@@ -614,6 +785,7 @@ class LightingDemoPipeline:
                 and mapped.quality_failures
                 and MAX_SDL_RETRIES
                 and not fixed_seed
+                and not self.fast_mode
             ):
                 first_generation = generation
                 first_pattern = pattern
@@ -690,6 +862,11 @@ class LightingDemoPipeline:
                         current_image,
                     )
 
+            if not self.fast_mode:
+                concept_image_path = generation.image_path
+                concept_source_image_path = generation.image_path
+                concept_manifest_path = generation.manifest_path
+
             stem = generation.image_path.stem
             suffix = "sdl_smooth" if sdl_available else "sdl_unavailable_preview"
             sdl_preview_path = run_dir / f"{stem}_{suffix}.png"
@@ -700,6 +877,7 @@ class LightingDemoPipeline:
             mapped.out_of_gamut_mask.save(mask_path, format="PNG")
 
             quality = mapped.quality.to_dict()
+            timings["pre_export_seconds"] = time.perf_counter() - pipeline_started
             provenance_path = self.lora_path.parent / "weight_provenance.json"
             weight_provenance: dict[str, Any] = {}
             if provenance_path.is_file():
@@ -715,7 +893,7 @@ class LightingDemoPipeline:
             report_path = run_dir / "pipeline_report.json"
             report = {
                 "traceability": {
-                    "pipeline_schema_version": 5,
+                    "pipeline_schema_version": 6,
                     "base_model": generation_details.get(
                         "base_model",
                         self.base_model,
@@ -748,6 +926,13 @@ class LightingDemoPipeline:
                 "palette_notice": palette_notice,
                 "module_01": attributes_dict,
                 "module_01_prompt_source": prompt_source,
+                "concept_image": {
+                    "path": str(concept_image_path),
+                    "source_path": str(concept_source_image_path),
+                    "manifest_path": str(concept_manifest_path),
+                    "sha256": _sha256_file(concept_image_path),
+                    "prompt": attributes.concept_prompt,
+                },
                 "module_03": {
                     "generation_mode": generation_details.get(
                         "generation_mode",
@@ -832,12 +1017,17 @@ class LightingDemoPipeline:
                     "retry_count": sdl_retry_count,
                     "attempts": sdl_attempts,
                 },
+                "performance": {
+                    "mode": "fast_dual_image" if self.fast_mode else "quality",
+                    "budget_seconds": self.time_budget_seconds,
+                    "timings": dict(timings),
+                },
             }
             report_path.write_text(
                 json.dumps(report, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
-            if mapped.quality_failures:
+            if mapped.quality_failures and not self.fast_mode:
                 raise RuntimeError(
                     "SDL mapped result failed quality policy after "
                     f"{sdl_retry_count + 1} attempts: "
@@ -855,6 +1045,9 @@ class LightingDemoPipeline:
             ) as archive:
                 archive_paths = [
                     prompt_json_path,
+                    concept_image_path,
+                    concept_source_image_path,
+                    concept_manifest_path,
                     generation.image_path,
                     generation.manifest_path,
                     pattern.image_path,
@@ -862,7 +1055,6 @@ class LightingDemoPipeline:
                     sdl_preview_path,
                     sdl_control_path,
                     mask_path,
-                    report_path,
                 ]
                 for optional_path in (
                     generation.diffusion_raw_path,
@@ -870,14 +1062,31 @@ class LightingDemoPipeline:
                 ):
                     if optional_path is not None:
                         archive_paths.append(optional_path)
-                for path in archive_paths:
+                unique_archive_paths = list(dict.fromkeys(archive_paths))
+                for path in unique_archive_paths:
                     archive.write(path, arcname=path.name)
+
+                timings["total_seconds"] = time.perf_counter() - pipeline_started
+                deadline_met = timings["total_seconds"] <= self.time_budget_seconds
+                report["performance"] = {
+                    "mode": "fast_dual_image" if self.fast_mode else "quality",
+                    "budget_seconds": self.time_budget_seconds,
+                    "deadline_met": deadline_met,
+                    "timings": dict(timings),
+                }
+                report_path.write_text(
+                    json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                archive.write(report_path, arcname=report_path.name)
 
             self._notify(progress, 1.0, "完成")
             return DemoPipelineResult(
                 run_dir=run_dir,
                 prompt=attributes.effect,
                 attributes=attributes_dict,
+                concept_image_path=concept_image_path,
+                concept_manifest_path=concept_manifest_path,
                 raw_image_path=generation.image_path,
                 themed_image_path=pattern.image_path,
                 sdl_preview_path=sdl_preview_path,
@@ -905,4 +1114,6 @@ class LightingDemoPipeline:
                 sdl_retry_count=sdl_retry_count,
                 sdl_available=sdl_available,
                 sdl_notice=sdl_notice,
+                timings=timings,
+                deadline_met=deadline_met,
             )

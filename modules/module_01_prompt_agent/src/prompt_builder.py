@@ -16,7 +16,7 @@ def build_system_prompt() -> str:
         "output represents a luminaire color field, not a photograph or an illustrated "
         "light effect. Never describe people, furniture, architecture, or objects.\n\n"
         "# Target Appearance #\n"
-        "Use one orderly left-to-right horizontal gradient with only two or three named "
+        "Use one orderly left-to-right horizontal gradient with two to four named "
         "colors. Choose one unmistakable dominant color that occupies the center and "
         "right portion of the panel, plus one secondary color on the left and at most one "
         "transition color. Keep the entire vertical axis uniform. Do not introduce mist, "
@@ -25,11 +25,11 @@ def build_system_prompt() -> str:
         "brightness, and the proportion of the dominant color.\n\n"
         "# Color Requirements #\n"
         f"Use only these exact supported color names: {supported_palette}. "
-        "Green, cyan, teal, dark blue, black, "
-        "and other dark colors are unavailable. Energetic scenes should use clean vivid "
+        "All hue families are available, including green, cyan, teal, navy, and indigo. "
+        "Energetic scenes should use clean vivid "
         "colors instead of conservative gray pastels. Calm scenes may use softer colors, "
-        "but they must still have a clear dominant hue. Translate unavailable scene colors "
-        "into the nearest permitted palette without adding unrelated colors.\n\n"
+        "but they must still have a clear dominant hue. Preserve colors explicitly requested "
+        "by the user and do not substitute one hue family for another.\n\n"
         "# Effect Caption Rules #\n"
         "Write 30 to 50 English words. The caption must:\n"
         "1. Start by describing a wide panoramic organizer-style color field.\n"
@@ -37,8 +37,13 @@ def build_system_prompt() -> str:
         "3. Explicitly call one color dominant or primary across the center and right.\n"
         "4. State that the transition is a smooth horizontal gradient.\n"
         "5. Finish with uniformly clean vertical color and an uninterrupted surface.\n"
-        "Use two colors by default and three only when the third color improves the scene. "
+        "Use two colors by default and up to four when the scene clearly calls for them. "
         "Never say both sides, because left, center, and right must remain unambiguous.\n\n"
+        "# Concept Image Prompt #\n"
+        "Also write concept_prompt as an 8 to 80 word English scene-image prompt. Unlike "
+        "effect, it must retain the real place, objects, plants, people when relevant, and "
+        "the requested atmosphere. It must use the same main color families as effect. "
+        "Do not mention text, logos, brands, or a luminaire panel.\n\n"
         "# Examples #\n"
         "Energetic disco -> electric purple on the left and dominant vivid magenta across "
         "the center and right, with a saturated smooth horizontal gradient.\n"
@@ -59,7 +64,9 @@ def build_system_prompt() -> str:
         'electric purple on the left and dominant vivid magenta across the center and '
         'right, forming a saturated smooth horizontal gradient with uniform vertical '
         'color, clean illumination, strong visual identity, and an uninterrupted '
-        'surface throughout."}\n'
+        'surface throughout.","concept_prompt":"A lively contemporary dance venue with '
+        'people moving through vivid purple and magenta ambient light, cinematic interior '
+        'photography, energetic atmosphere, clean composition."}\n'
         "Use JSON integers for all intensity values. Do not add Markdown or explanations."
     )
 

@@ -38,13 +38,13 @@ class SyntheticGeneratorTests(unittest.TestCase):
         self.assertFalse(palette_is_allowed([np.array([20, 40, 255], dtype=np.float32)]))
         self.assertTrue(palette_is_allowed([np.array([160, 200, 255], dtype=np.float32)]))
 
-    def test_final_pixel_audit_rejects_green_middle_of_blue_yellow_gradient(self):
+    def test_final_pixel_audit_accepts_green_middle_of_blue_yellow_gradient(self):
         import numpy as np
 
         blue = np.array([40, 150, 230], dtype=np.float32)
         yellow = np.array([250, 245, 30], dtype=np.float32)
         blend = np.linspace(blue, yellow, 256, dtype=np.float32)[None, :, :]
-        self.assertFalse(audit_rgb_pixels(blend).allowed)
+        self.assertTrue(audit_rgb_pixels(blend).allowed)
 
     def test_final_pixel_audit_accepts_warm_gradient(self):
         import numpy as np
@@ -209,11 +209,11 @@ class SplitTests(unittest.TestCase):
 
 
 class VisionCaptionTests(unittest.TestCase):
-    def test_rejects_forbidden_color_in_caption(self):
-        with self.assertRaises(VisionCaptionError):
-            validate_caption(
-                "A seamless green and yellow panoramic gradient with a soft luminous center and flowing atmospheric texture."
-            )
+    def test_accepts_green_color_in_caption(self):
+        caption = validate_caption(
+            "A seamless green and yellow panoramic gradient with a soft luminous center and flowing atmospheric texture."
+        )
+        self.assertIn("green", caption)
 
     def test_caption_metadata_writes_grounded_caption_and_can_resume(self):
         class FakeClient:

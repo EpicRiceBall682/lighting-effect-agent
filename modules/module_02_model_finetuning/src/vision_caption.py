@@ -24,18 +24,7 @@ DEFAULT_GITHUB_MODEL = "openai/gpt-4o"
 DEFAULT_LOCAL_MODEL = "HuggingFaceTB/SmolVLM-500M-Instruct"
 FORBIDDEN_CAPTION_TERMS = (
     "black",
-    "dark",
     "shadow",
-    "green",
-    "cyan",
-    "teal",
-    "turquoise",
-    "mint",
-    "lime",
-    "olive",
-    "emerald",
-    "navy",
-    "indigo",
 )
 
 
@@ -113,9 +102,8 @@ class GitHubVisionCaptionClient:
             "exactly one field named text. The text must be a single English sentence of 20 to 45 "
             "words describing only what is visible: color order and direction, gradient structure, "
             "mist, clouds or glow, brightness and smoothness. Do not invent a room, people or objects. "
-            "Do not use black, dark, shadow, green, cyan, teal, turquoise, mint, lime, olive, emerald, "
-            "navy or indigo. Prefer precise terms such as ivory, pale yellow, amber, orange, coral, "
-            "pink, red, lavender, light blue and white when they are actually visible."
+            "All visible hue families are allowed, including green, cyan, teal, navy and indigo. "
+            "Use precise color names and preserve their actual left-to-right order."
         )
         payload = {
             "model": self.model,

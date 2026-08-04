@@ -5,32 +5,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-
-ALLOWED_NAMED_COLORS: tuple[tuple[str, tuple[int, int, int]], ...] = (
-    ("pale golden yellow", (246, 218, 126)),
-    ("pale yellow", (250, 231, 153)),
-    ("pure yellow", (255, 224, 76)),
-    ("light blue", (151, 203, 238)),
-    ("sky blue", (145, 199, 235)),
-    ("warm orange", (238, 154, 91)),
-    ("soft orange", (242, 174, 112)),
-    ("warm peach", (242, 183, 157)),
-    ("light peach", (244, 197, 170)),
-    ("pale pink", (242, 190, 207)),
-    ("soft pink", (239, 177, 203)),
-    ("light purple", (197, 180, 225)),
-    ("pale lavender", (211, 199, 230)),
-    ("lavender", (194, 174, 219)),
-    ("ivory", (250, 241, 211)),
-    ("coral", (237, 151, 139)),
-    ("amber", (237, 178, 84)),
-    ("red", (231, 115, 109)),
-)
+from modules.color_vocabulary import matched_color_spans
 
 THEME_DEFAULT_PALETTES: dict[str, tuple[tuple[int, int, int], ...]] = {
-    "flowing": ((151, 203, 238), (242, 190, 207), (246, 218, 126)),
-    "breathing": ((250, 231, 153), (242, 183, 157), (197, 180, 225)),
-    "radiant": ((250, 241, 211), (246, 218, 126), (242, 190, 207)),
+    "flowing": ((78, 207, 218), (72, 156, 235), (54, 205, 104)),
+    "breathing": ((197, 235, 195), (242, 183, 157), (197, 180, 225)),
+    "radiant": ((250, 241, 211), (255, 226, 70), (74, 214, 112)),
 }
 
 DENSITY_TO_PIXEL_LEVEL = {
@@ -127,10 +107,9 @@ def _theme_signature(scene: str) -> tuple[str, str, str, str, float]:
 
 
 def _palette_from_effect(effect: str, theme: str) -> tuple[tuple[int, int, int], ...]:
-    lowered = effect.casefold()
     selected: list[tuple[int, int, int]] = []
-    for name, rgb in ALLOWED_NAMED_COLORS:
-        if name in lowered and rgb not in selected:
+    for _start, _end, _name, rgb in matched_color_spans(effect):
+        if rgb not in selected:
             selected.append(rgb)
     for rgb in THEME_DEFAULT_PALETTES[theme]:
         if rgb not in selected:

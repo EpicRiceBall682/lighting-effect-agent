@@ -88,7 +88,7 @@ def build_structured_gradient_plan(
     prompt: str,
     source_image: Image.Image,
 ) -> StructuredGradientPlan:
-    """Build a maximum-three-stop horizontal plan from explicit prompt colors."""
+    """Build a maximum-four-stop horizontal plan from explicit prompt colors."""
 
     unsupported = unsupported_color_terms(prompt)
     if unsupported:
@@ -130,7 +130,7 @@ def build_structured_gradient_plan(
             stops.append(
                 GradientStop(1.0, stops[-1].rgb, stops[-1].color_name, stops[-1].role)
             )
-        stops = stops[:3] if len(stops) > 3 else stops
+        stops = stops[:4] if len(stops) > 4 else stops
         dominant = next(
             (stop.color_name for stop in stops if stop.role == "primary"),
             stops[-1].color_name,
@@ -191,8 +191,12 @@ def build_structured_gradient_plan(
             source="prompt_dominant_color",
         )
 
-    selected = unique_mentions[:3]
-    positions = (0.0, 1.0) if len(selected) == 2 else (0.0, 0.5, 1.0)
+    selected = unique_mentions[:4]
+    positions = {
+        2: (0.0, 1.0),
+        3: (0.0, 0.5, 1.0),
+        4: (0.0, 0.34, 0.68, 1.0),
+    }[len(selected)]
     stops = tuple(
         GradientStop(position, rgb, name, "primary" if index == 1 else "secondary")
         for index, (position, (name, rgb, _dominant)) in enumerate(
@@ -226,59 +230,7 @@ def render_base_gradient(
         axis=-1,
     )
     pixels = np.repeat(line[np.newaxis, :, :], height, axis=0)
-    if plan.source != "diffusion_column_profile":
-        pixels = _neutralize_forbidden_transition_hues(pixels)
     return Image.fromarray(np.rint(np.clip(pixels, 0, 255)).astype(np.uint8), mode="RGB")
-
-
-def _neutralize_forbidden_transition_hues(pixels: np.ndarray) -> np.ndarray:
-    """Turn incidental green/cyan interpolation into a low-chroma light bridge."""
-
-    rgb = np.asarray(pixels, dtype=np.float32) / 255.0
-    red, green, blue = rgb[..., 0], rgb[..., 1], rgb[..., 2]
-    maximum = rgb.max(axis=2)
-    minimum = rgb.min(axis=2)
-    delta = maximum - minimum
-    saturation = np.divide(
-        delta,
-        maximum,
-        out=np.zeros_like(delta),
-        where=maximum > 1e-8,
-    )
-    hue = np.zeros_like(maximum)
-    nonzero = delta > 1e-6
-    red_max = (maximum == red) & nonzero
-    green_max = (maximum == green) & nonzero
-    blue_max = (maximum == blue) & nonzero
-    hue[red_max] = np.mod(
-        (green[red_max] - blue[red_max]) / delta[red_max],
-        6,
-    )
-    hue[green_max] = (
-        (blue[green_max] - red[green_max]) / delta[green_max] + 2
-    )
-    hue[blue_max] = (
-        (red[blue_max] - green[blue_max]) / delta[blue_max] + 4
-    )
-    hue /= 6.0
-    # Feather toward a neutral bridge before entering the forbidden hue range
-    # and back out before reaching the requested blue endpoint. This avoids
-    # visible vertical seams at the safety-range boundaries.
-    left_feather = np.clip((hue - 0.15) / 0.04, 0.0, 1.0)
-    right_feather = np.clip((0.58 - hue) / 0.06, 0.0, 1.0)
-    feather = np.minimum(left_feather, right_feather)
-    candidate = (saturation > 0.12) & (feather > 0.0)
-    if not bool(np.any(candidate)):
-        return np.asarray(pixels, dtype=np.float32)
-
-    target_saturation = 0.12
-    blend = np.zeros_like(saturation)
-    blend[candidate] = feather[candidate] * (
-        1.0 - target_saturation / saturation[candidate]
-    )
-    light_neutral = maximum[..., None]
-    corrected = rgb * (1.0 - blend[..., None]) + light_neutral * blend[..., None]
-    return corrected * 255.0
 
 
 def structured_gradient_metrics(image: Image.Image) -> dict[str, float]:

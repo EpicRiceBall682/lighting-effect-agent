@@ -1,15 +1,22 @@
 # 宽幅光效智能体
 
-本项目把中文场景转成可校验的英文光效提示词，使用 Stable Diffusion 1.5 +
-LoRA 生成宽幅 Raw 光效图，再映射到目标 SDL 硬件色域。核心链路为：
+本项目把中文场景转成共享视觉规格和统一色彩蓝图，快速生成一张带实体场景的
+概念图，再按同一蓝图协调概念图色彩并生成宽幅光色图，最后映射到目标 SDL
+硬件色域。核心链路为：
 
 ```text
-中文场景 → 结构化 Prompt → 主渐变＋弱 LoRA 光感
-        → 模块五低频主题增强 → SDL 视觉预览与严格控制图
+中文场景 → 本地快速视觉规格与色彩蓝图 → 实体概念图
+        → 概念图色彩协调 + 同蓝图宽幅渐变 → 模块五增强 → SDL 输出
 ```
 
 模块五以低频连续主题光场增强接入模块三与模块四之间；质量不通过时会
 自动降低强度或安全绕过，不会阻断 SDL 输出。
+
+默认网页采用四步 LCM 概念图推理，只运行一次扩散模型；概念图和光色图共享
+用户指定的颜色、顺序与比例，概念图只做轻量色彩协调。模型加载在网页开放前
+完成，目标是在支持 CUDA 的 Windows 设备上于
+6 秒内同时显示概念图和光色图。绿色、青色及其他色相均允许，硬件边界仍由
+SDL 映射处理。CPU 可以运行，但不承诺 6 秒目标。
 
 ## Windows 快速开始
 
@@ -20,7 +27,8 @@ start_demo_windows.bat
 ```
 
 脚本会自动创建 `.venv`、安装依赖、检测并优先使用 NVIDIA CUDA、询问当前进程
-使用的 DeepSeek API Key，并打开 `http://127.0.0.1:7860/`。API Key 不会写入
+使用的 DeepSeek API Key，并打开 `http://127.0.0.1:7860/`。默认快速模式不依赖
+DeepSeek 网络响应；API Key 仅供质量模式使用且不会写入
 项目文件。检测到 CUDA 时会显示显卡名称并明确使用 `--device cuda`；否则会提示
 CPU 回退。如果电脑有 NVIDIA 驱动但当前 PyTorch 不支持 CUDA，脚本会给出官方
 CUDA 安装入口。
@@ -45,7 +53,8 @@ $env:DEEPSEEK_API_KEY="你的 DeepSeek API Key"
 .\.venv\Scripts\python.exe -m modules.module_06_demo_evaluation.src.app --inbrowser
 ```
 
-第一次生成会从 Hugging Face 下载 Stable Diffusion 1.5 基础模型。没有可用的
+首次启动会从 Hugging Face 下载 Stable Diffusion 1.5 基础模型和概念图 LCM
+加速适配器。没有可用的
 NVIDIA CUDA 环境时会自动使用 CPU，功能可用但生成速度会明显变慢。Windows
 CUDA 版 PyTorch 应根据显卡驱动从 `https://pytorch.org/get-started/locally/`
 选择合适版本，不建议盲目固定 CUDA wheel。

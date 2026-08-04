@@ -28,7 +28,8 @@ class ImageQualityPolicy:
 
     minimum_mean_luminance: float = 0.25
     maximum_near_black_fraction: float = 0.10
-    maximum_forbidden_hue_fraction: float = 0.005
+    # Retained for report compatibility. Full-hue generation is now allowed.
+    maximum_forbidden_hue_fraction: float = 1.0
     maximum_abrupt_transition_fraction: float = 0.01
     maximum_isolated_chroma_fraction: float = 0.001
     maximum_broad_chroma_fraction: float = 0.003
@@ -158,8 +159,6 @@ def analyze_image_quality(image: Image.Image) -> ImageQualityReport:
     warnings: list[str] = []
     if mean_luminance < 0.25:
         warnings.append("image is much darker than the requested bright light-effect palette")
-    if forbidden_fraction > 0.01:
-        warnings.append("image contains visible green/cyan pixels")
     if abrupt_fraction > 0.01:
         warnings.append("image contains many abrupt pixel transitions or edge artifacts")
     if isolated_fraction > 0.001:
