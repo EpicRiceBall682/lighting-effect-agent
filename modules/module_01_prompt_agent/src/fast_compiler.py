@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from .agent import density_for_space_size
 from .schemas import LightingEffectAttributes
@@ -21,20 +22,297 @@ COLOR_CUES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("靛", "indigo"), "indigo"),
 )
 
-SUBJECT_CUES: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("花海", "花园", "鲜花", "草地", "草原"), "open meadow filled with flowers and grasses"),
-    (("森林", "树林", "绿植", "植被"), "lush forest clearing with layered plants and natural textures"),
-    (("咖啡", "coffee", "cafe"), "welcoming contemporary coffee shop with tables, chairs, and people"),
-    (("酒店", "大堂", "hotel", "lobby"), "refined hotel interior with seating, architectural details, and guests"),
-    (("卧室", "客房", "bedroom"), "comfortable bedroom with a bed, textiles, and calm interior details"),
-    (("客厅", "living"), "modern living room with furniture, plants, and layered materials"),
-    (("餐厅", "用餐", "restaurant"), "atmospheric restaurant with dining tables, guests, and refined materials"),
-    (("海边", "沙滩", "海滩", "海洋", "seaside"), "wide seaside setting with water, sky, shoreline, and people"),
-    (("办公室", "工作", "office"), "contemporary workspace with desks, people, and practical details"),
-    (("运动", "体育", "健身", "球场", "gym", "sports"), "active sports space with athletes and recognizable equipment"),
-    (("商店", "零售", "橱窗", "店铺", "retail"), "stylish retail interior with products, displays, and visitors"),
+EXPLICIT_CHINESE_COLOR_CUES = (
+    "粉",
+    "红",
+    "橙",
+    "黄",
+    "金色",
+    "绿",
+    "青色",
+    "蓝",
+    "紫",
+    "白",
+    "靛",
+)
+EXPLICIT_ENGLISH_COLOR_PATTERN = re.compile(
+    r"\b(?:pink|red|orange|yellow|gold|green|cyan|teal|turquoise|blue|purple|"
+    r"lavender|white|indigo|magenta|navy|amber|peach|coral|ivory)\b",
+    re.IGNORECASE,
 )
 
+
+def has_explicit_color_cue(scene: str) -> bool:
+    """Return whether the user stated a color rather than only a mood or style."""
+
+    text = str(scene)
+    return any(cue in text for cue in EXPLICIT_CHINESE_COLOR_CUES) or bool(
+        EXPLICIT_ENGLISH_COLOR_PATTERN.search(text)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class StyleSpec:
+    cues: tuple[str, ...]
+    colors: tuple[str, ...]
+    mood: str
+    intensities: tuple[int, int, int]
+    default_subject: str
+    composition: str
+
+
+STYLE_SPECS: tuple[StyleSpec, ...] = (
+    StyleSpec(
+        ("赛博朋克", "cyberpunk", "霓虹未来"),
+        ("electric purple", "vivid magenta", "bright cyan", "bright blue"),
+        "futuristic neon energetic",
+        (84, 92, 76),
+        "a neon-lit futuristic city street with reflective surfaces and layered architecture",
+        "high-contrast cyberpunk atmosphere with luminous signs and technological details",
+    ),
+    StyleSpec(
+        ("未来主义", "科技感", "科幻", "futuristic", "sci-fi"),
+        ("bright cyan", "bright blue", "vivid purple"),
+        "clean futuristic dynamic",
+        (78, 88, 72),
+        "a futuristic architectural environment with advanced materials and technology",
+        "clean high-tech composition with precise luminous details",
+    ),
+    StyleSpec(
+        ("极简", "简约", "minimal", "minimalist"),
+        ("soft white", "pale blue", "light cyan"),
+        "quiet minimal refined",
+        (58, 66, 56),
+        "a minimal contemporary space with simple geometry and restrained materials",
+        "uncluttered composition with generous negative space",
+    ),
+    StyleSpec(
+        ("复古", "怀旧", "中古", "retro", "vintage"),
+        ("warm orange", "amber", "soft pink"),
+        "nostalgic warm expressive",
+        (68, 78, 64),
+        "a nostalgic retro setting with period furniture and recognizable vintage details",
+        "cinematic vintage composition with tactile materials",
+    ),
+    StyleSpec(
+        ("禅意", "侘寂", "东方", "zen", "wabi-sabi"),
+        ("soft white", "pale green", "amber"),
+        "calm contemplative natural",
+        (54, 62, 56),
+        "a tranquil contemplative space with natural materials and restrained objects",
+        "balanced composition with quiet handcrafted details",
+    ),
+    StyleSpec(
+        ("奢华", "高级感", "豪华", "luxury", "luxurious"),
+        ("deep navy", "amber", "pale golden yellow"),
+        "dramatic luxurious elegant",
+        (66, 82, 62),
+        "an elegant luxury environment with refined materials and architectural details",
+        "layered cinematic composition with polished surfaces",
+    ),
+    StyleSpec(
+        ("工业风", "粗犷", "industrial style"),
+        ("deep navy", "amber", "warm orange"),
+        "bold industrial dramatic",
+        (70, 84, 66),
+        "an industrial-style environment with metal structures and exposed materials",
+        "strong architectural composition with functional details",
+    ),
+    StyleSpec(
+        ("童趣", "梦幻", "可爱", "playful", "whimsical", "cute"),
+        ("soft pink", "bright yellow", "light cyan", "light purple"),
+        "playful imaginative cheerful",
+        (76, 82, 74),
+        "an imaginative playful setting with friendly forms and recognizable objects",
+        "cheerful composition with soft rounded details",
+    ),
+)
+
+@dataclass(frozen=True, slots=True)
+class SceneSpec:
+    name: str
+    cues: tuple[str, ...]
+    subject: str
+    composition: str
+
+
+SCENE_SPECS: tuple[SceneSpec, ...] = (
+    SceneSpec(
+        "sky_clouds",
+        ("蓝天白云", "蓝天", "白云", "天空", "云层", "云朵", "晴空", "sky", "cloud"),
+        "a vast blue sky with layered white clouds seen from below",
+        "sky fills the entire frame, with no ground, water, buildings, or interiors",
+    ),
+    SceneSpec(
+        "sunrise_sunset",
+        ("日出", "晨曦", "朝霞", "夕阳", "日落", "晚霞", "黄昏", "sunrise", "sunset"),
+        "an expansive outdoor horizon beneath a dramatic sunrise or sunset sky",
+        "an open-air landscape composition without interior architecture or furniture",
+    ),
+    SceneSpec(
+        "weather",
+        ("雨天", "下雨", "雨景", "雪天", "下雪", "雪景", "雾天", "雨后", "rain", "snow", "fog"),
+        "a recognizable outdoor landscape shaped by rain, snow, or atmospheric weather",
+        "a weather-dominant open-air composition without indoor rooms or ceilings",
+    ),
+    SceneSpec(
+        "flower_meadow",
+        ("花海", "鲜花", "草地", "草原", "牧场", "meadow", "grassland"),
+        "an open meadow filled with flowers and grasses",
+        "a broad outdoor landscape with a visible horizon and no interior furnishings",
+    ),
+    SceneSpec(
+        "forest",
+        ("森林", "树林", "林间", "竹林", "绿植", "植被", "forest", "woodland"),
+        "a lush forest clearing with layered plants and natural textures",
+        "an outdoor woodland composition without rooms, walls, or furniture",
+    ),
+    SceneSpec(
+        "mountain",
+        ("雪山", "山谷", "山脉", "高山", "峡谷", "悬崖", "mountain", "valley", "canyon"),
+        "a dramatic mountain landscape with layered peaks, terrain, and atmospheric depth",
+        "a wide outdoor composition without interior architecture or furniture",
+    ),
+    SceneSpec(
+        "inland_water",
+        ("湖边", "湖面", "湖泊", "河边", "河流", "瀑布", "溪流", "lake", "river", "waterfall"),
+        "a natural waterside landscape with reflective water, shoreline, and distant terrain",
+        "an open-air composition without indoor rooms, furniture, walls, or ceilings",
+    ),
+    SceneSpec(
+        "seaside",
+        ("海边", "沙滩", "海滩", "海洋", "海面", "seaside", "beach", "ocean"),
+        "a wide seaside setting with water, sky, shoreline, and recognizable coastal details",
+        "an open-air coastal composition without interior rooms or furniture",
+    ),
+    SceneSpec(
+        "desert",
+        ("沙漠", "沙丘", "戈壁", "荒漠", "desert", "dune"),
+        "an expansive desert landscape with sculpted dunes and a distant horizon",
+        "a wide outdoor composition without rooms, furniture, walls, or ceilings",
+    ),
+    SceneSpec(
+        "park_garden",
+        ("公园", "花园", "庭院", "植物园", "园林", "park", "garden", "courtyard"),
+        "a landscaped park or garden with paths, plants, seating, and visitors",
+        "a coherent outdoor public-space composition without enclosed rooms",
+    ),
+    SceneSpec(
+        "urban_outdoor",
+        ("城市", "街道", "街头", "广场", "天际线", "夜景", "步行街", "city", "street", "plaza", "skyline"),
+        "a recognizable urban outdoor setting with streets, architecture, and people",
+        "an exterior city composition without indoor rooms, furniture, or ceilings",
+    ),
+    SceneSpec(
+        "cafe",
+        ("咖啡", "咖啡馆", "coffee", "cafe"),
+        "a welcoming contemporary coffee shop with tables, chairs, and people",
+        "a coherent indoor hospitality composition with recognizable cafe details",
+    ),
+    SceneSpec(
+        "restaurant_bar",
+        ("餐厅", "用餐", "酒吧", "清吧", "restaurant", "dining", "bar", "lounge"),
+        "an atmospheric restaurant or lounge with tables, guests, and refined materials",
+        "a coherent indoor hospitality composition with recognizable dining details",
+    ),
+    SceneSpec(
+        "retail",
+        ("商店", "零售", "橱窗", "店铺", "商场", "超市", "购物中心", "retail", "store", "mall"),
+        "a stylish retail interior with products, displays, circulation, and visitors",
+        "a coherent commercial interior with recognizable merchandise and fixtures",
+    ),
+    SceneSpec(
+        "hotel",
+        ("酒店", "大堂", "前台", "hotel", "lobby", "reception"),
+        "a refined hotel interior with seating, architectural details, and guests",
+        "a coherent hospitality interior with a visible reception or lounge context",
+    ),
+    SceneSpec(
+        "bedroom",
+        ("卧室", "客房", "睡眠", "bedroom", "guest room"),
+        "a comfortable bedroom with a bed, textiles, and calm interior details",
+        "a coherent residential interior with recognizable bedroom furnishings",
+    ),
+    SceneSpec(
+        "living_room",
+        ("客厅", "起居室", "会客", "living room"),
+        "a modern living room with furniture, plants, and layered materials",
+        "a coherent residential interior with recognizable seating and circulation",
+    ),
+    SceneSpec(
+        "kitchen",
+        ("厨房", "烹饪", "料理", "kitchen", "cooking"),
+        "a contemporary kitchen with counters, cabinetry, appliances, and people",
+        "a coherent residential interior with recognizable food-preparation details",
+    ),
+    SceneSpec(
+        "bath_spa",
+        ("浴室", "卫生间", "洗手间", "水疗", "温泉", "bathroom", "spa"),
+        "a clean bathroom or spa interior with stone, water, and wellness details",
+        "a coherent indoor wellness composition with realistic fixtures and materials",
+    ),
+    SceneSpec(
+        "office",
+        ("办公室", "办公", "会议室", "工作", "office", "workspace", "meeting room"),
+        "a contemporary workspace with desks, people, and practical details",
+        "a coherent indoor workplace composition with recognizable work activities",
+    ),
+    SceneSpec(
+        "education",
+        ("教室", "学校", "课堂", "图书馆", "阅读室", "classroom", "school", "library"),
+        "a recognizable learning space with students, desks, books, and educational details",
+        "a coherent education interior matching the described activity",
+    ),
+    SceneSpec(
+        "healthcare",
+        ("医院", "诊所", "病房", "候诊", "康复", "hospital", "clinic", "ward"),
+        "a clean healthcare environment with staff, patients, and recognizable medical details",
+        "a coherent clinical interior without hospitality or retail furnishings",
+    ),
+    SceneSpec(
+        "culture_exhibition",
+        ("博物馆", "美术馆", "画廊", "展厅", "展览", "museum", "gallery", "exhibition"),
+        "a spacious museum or gallery with exhibits, visitors, and architectural details",
+        "a coherent cultural interior with clearly visible displays and circulation",
+    ),
+    SceneSpec(
+        "performance",
+        ("剧院", "舞台", "影院", "演出", "音乐会", "theater", "stage", "cinema", "concert"),
+        "a performance venue with a stage, audience, seating, and recognizable equipment",
+        "a coherent entertainment interior focused on the performance area",
+    ),
+    SceneSpec(
+        "sports",
+        ("运动", "体育", "健身", "球场", "泳池", "gym", "sports", "stadium", "pool"),
+        "an active sports space with athletes and recognizable equipment",
+        "a coherent athletic setting matching the described sport",
+    ),
+    SceneSpec(
+        "transport",
+        ("机场", "车站", "火车站", "地铁", "候机", "候车", "airport", "station", "subway"),
+        "a modern transport hub with passengers, circulation, signage forms, and vehicles",
+        "a coherent transit environment with recognizable platforms or waiting areas",
+    ),
+    SceneSpec(
+        "industrial",
+        ("工厂", "车间", "仓库", "厂房", "生产线", "factory", "workshop", "warehouse"),
+        "an industrial workspace with machinery, structural details, and workers",
+        "a coherent production or storage environment with realistic equipment",
+    ),
+    SceneSpec(
+        "circulation",
+        ("走廊", "过道", "楼梯", "电梯厅", "通道", "corridor", "hallway", "staircase"),
+        "an architectural circulation space with corridors, stairs, doors, and people",
+        "a coherent interior perspective emphasizing movement and spatial depth",
+    ),
+)
+
+DEFAULT_SCENE_SPEC = SceneSpec(
+    "general",
+    (),
+    "a recognizable real-world setting matching the described activity",
+    "a context-faithful composition without unrelated furniture or architecture",
+)
 
 @dataclass(frozen=True, slots=True)
 class FastPromptCompiler:
@@ -53,9 +331,15 @@ class FastPromptCompiler:
         if len(scene) < 2:
             raise ValueError("scene_description must contain at least two characters")
 
-        colors = self._ordered_colors(scene)
-        subject = self._subject(scene)
-        mood, intensities = self._mood(scene)
+        style_spec = self._style_spec(scene)
+        colors = self._ordered_colors(scene, style_spec=style_spec)
+        scene_spec = self._scene_spec(scene)
+        mood, intensities = self._mood(scene, style_spec=style_spec)
+        subject = scene_spec.subject
+        composition = scene_spec.composition
+        if scene_spec.name == "general" and style_spec is not None:
+            subject = style_spec.default_subject
+            composition = style_spec.composition
         density = (
             density_for_space_size(float(space_size_m2))
             if space_size_m2 is not None
@@ -64,10 +348,8 @@ class FastPromptCompiler:
         effect = self._effect(colors, mood)
         color_placement = self._color_placement(colors)
         concept_prompt = (
-            f"Cinematic view of a {subject}, with ambient lighting arranged as "
-            f"{color_placement}, expressing a {mood} mood, with tangible objects, "
-            "realistic materials, natural depth, balanced composition, no text, logos, "
-            "or watermark."
+            f"Cinematic view of {subject}. {composition}. Lighting: "
+            f"{color_placement}. {mood} atmosphere, realistic detail and depth."
         )
         return LightingEffectAttributes.from_mapping(
             {
@@ -81,7 +363,11 @@ class FastPromptCompiler:
         )
 
     @staticmethod
-    def _ordered_colors(scene: str) -> tuple[str, ...]:
+    def _ordered_colors(
+        scene: str,
+        *,
+        style_spec: StyleSpec | None = None,
+    ) -> tuple[str, ...]:
         lowered = scene.casefold()
         located: list[tuple[int, str]] = []
         for cues, color in COLOR_CUES:
@@ -94,7 +380,9 @@ class FastPromptCompiler:
             if color not in ordered:
                 ordered.append(color)
         if not ordered:
-            if any(cue in lowered for cue in ("清新", "自然", "fresh", "nature")):
+            if style_spec is not None:
+                ordered = list(style_spec.colors)
+            elif any(cue in lowered for cue in ("清新", "自然", "fresh", "nature")):
                 ordered = ["pale yellow", "bright green", "light blue"]
             elif any(cue in lowered for cue in ("浪漫", "romantic")):
                 ordered = ["soft pink", "vivid purple"]
@@ -114,15 +402,33 @@ class FastPromptCompiler:
         return tuple(ordered[:4])
 
     @staticmethod
-    def _subject(scene: str) -> str:
+    def _scene_spec(scene: str) -> SceneSpec:
         lowered = scene.casefold()
-        for cues, subject in SUBJECT_CUES:
-            if any(cue.casefold() in lowered for cue in cues):
-                return subject
-        return "contemporary real-world scene with people, furniture, plants, and clear spatial context"
+        for spec in SCENE_SPECS:
+            if any(cue.casefold() in lowered for cue in spec.cues):
+                return spec
+        return DEFAULT_SCENE_SPEC
 
     @staticmethod
-    def _mood(scene: str) -> tuple[str, tuple[int, int, int]]:
+    def _style_spec(scene: str) -> StyleSpec | None:
+        lowered = scene.casefold()
+        for spec in STYLE_SPECS:
+            if any(cue.casefold() in lowered for cue in spec.cues):
+                return spec
+        return None
+
+    @classmethod
+    def _subject(cls, scene: str) -> str:
+        """Compatibility helper for callers that only need the subject phrase."""
+
+        return cls._scene_spec(scene).subject
+
+    @staticmethod
+    def _mood(
+        scene: str,
+        *,
+        style_spec: StyleSpec | None = None,
+    ) -> tuple[str, tuple[int, int, int]]:
         lowered = scene.casefold()
         if any(cue in lowered for cue in ("活力", "运动", "热烈", "energetic")):
             return "vivid energetic", (82, 90, 72)
@@ -132,6 +438,8 @@ class FastPromptCompiler:
             return "fresh natural", (72, 78, 76)
         if any(cue in lowered for cue in ("安静", "放松", "睡眠", "calm", "relax")):
             return "calm relaxing", (56, 62, 58)
+        if style_spec is not None:
+            return style_spec.mood, style_spec.intensities
         return "balanced welcoming", (70, 76, 68)
 
     @staticmethod

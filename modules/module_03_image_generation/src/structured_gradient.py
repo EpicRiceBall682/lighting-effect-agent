@@ -12,7 +12,11 @@ from modules.color_vocabulary import (
     matched_color_spans,
     unsupported_color_terms,
 )
-from modules.linear_luminance import apply_chromaticity_preserving_gain
+from modules.linear_luminance import (
+    apply_chromaticity_preserving_gain,
+    blend_with_white_linear,
+    relative_luminance_rgb8,
+)
 
 from .prompt_guidance import extract_color_anchors
 
@@ -20,6 +24,176 @@ from .prompt_guidance import extract_color_anchors
 MAX_TEXTURE_STRENGTH = 0.20
 DEFAULT_TEXTURE_STRENGTH = 0.10
 MAX_VERTICAL_VARIATION = 0.018
+
+
+@dataclass(frozen=True, slots=True)
+class BrightnessPolicy:
+    mode: str
+    target_mean_luminance: float
+    target_p10_luminance: float
+    maximum_chromaticity_gain: float
+    maximum_white_mix: float
+
+
+STANDARD_BRIGHTNESS_POLICY = BrightnessPolicy(
+    mode="standard",
+    target_mean_luminance=0.35,
+    target_p10_luminance=0.18,
+    maximum_chromaticity_gain=1.35,
+    maximum_white_mix=0.22,
+)
+ENERGETIC_BRIGHTNESS_POLICY = BrightnessPolicy(
+    mode="energetic",
+    target_mean_luminance=0.32,
+    target_p10_luminance=0.20,
+    maximum_chromaticity_gain=1.35,
+    maximum_white_mix=0.24,
+)
+DARK_BRIGHTNESS_POLICY = BrightnessPolicy(
+    mode="intentional_dark",
+    target_mean_luminance=0.24,
+    target_p10_luminance=0.10,
+    maximum_chromaticity_gain=1.35,
+    maximum_white_mix=0.12,
+)
+
+_DARK_SCENE_CUES = (
+    "暗调",
+    "微光",
+    "助眠",
+    "夜晚",
+    "夜间",
+    "深夜",
+    "隐约",
+    "昏暗",
+    "低照度",
+    "神秘",
+    "私密",
+    "dim",
+    "low light",
+    "sleep",
+    "night",
+    "mysterious",
+    "private",
+)
+_ENERGETIC_SCENE_CUES = (
+    "霓虹",
+    "能量",
+    "活力",
+    "健身",
+    "运动",
+    "涂鸦",
+    "街头",
+    "动态",
+    "互动",
+    "唤醒",
+    "清醒",
+    "快速",
+    "即时吸引",
+    "明亮",
+    "neon",
+    "energy",
+    "energetic",
+    "vibrant",
+    "fitness",
+    "gym",
+    "sport",
+    "graffiti",
+    "street",
+    "dynamic",
+    "interactive",
+    "wake",
+    "bright",
+)
+
+
+def scene_brightness_policy(scene: str) -> BrightnessPolicy:
+    """Choose a luminance floor while honoring explicit dark-scene intent."""
+
+    normalized = " ".join(str(scene).casefold().split())
+    if any(cue in normalized for cue in _DARK_SCENE_CUES):
+        return DARK_BRIGHTNESS_POLICY
+    if any(cue in normalized for cue in _ENERGETIC_SCENE_CUES):
+        return ENERGETIC_BRIGHTNESS_POLICY
+    return STANDARD_BRIGHTNESS_POLICY
+
+
+def _luminance_summary(image: Image.Image) -> dict[str, float]:
+    luminance = relative_luminance_rgb8(
+        np.asarray(image.convert("RGB"), dtype=np.float32)
+    )
+    return {
+        "mean_luminance": float(luminance.mean()),
+        "p10_luminance": float(np.quantile(luminance, 0.10)),
+        "below_0_20_fraction": float(np.mean(luminance < 0.20)),
+    }
+
+
+def apply_scene_brightness_floor(
+    image: Image.Image,
+    scene: str,
+) -> tuple[Image.Image, dict[str, object]]:
+    """Brighten a light field without rerunning diffusion or changing its layout."""
+
+    source = image.convert("RGB")
+    policy = scene_brightness_policy(scene)
+    before = _luminance_summary(source)
+    needs_lift = (
+        before["mean_luminance"] < policy.target_mean_luminance
+        or before["p10_luminance"] < policy.target_p10_luminance
+    )
+    if not needs_lift:
+        return source, {
+            "applied": False,
+            "policy": asdict(policy),
+            "before": before,
+            "after": before,
+            "requested_chromaticity_gain": 1.0,
+            "mean_effective_chromaticity_gain": 1.0,
+            "white_mix": 0.0,
+        }
+
+    requested_gain = max(
+        1.0,
+        policy.target_mean_luminance / max(before["mean_luminance"], 1e-6),
+        policy.target_p10_luminance / max(before["p10_luminance"], 1e-6),
+    )
+    requested_gain = min(requested_gain, policy.maximum_chromaticity_gain)
+    source_rgb = np.asarray(source, dtype=np.float32)
+    gained_rgb, effective_gain = apply_chromaticity_preserving_gain(
+        source_rgb,
+        np.full((*source_rgb.shape[:2], 1), requested_gain, dtype=np.float32),
+    )
+    gained = Image.fromarray(gained_rgb, mode="RGB")
+    after_gain = _luminance_summary(gained)
+
+    mean_mix = max(
+        0.0,
+        (policy.target_mean_luminance - after_gain["mean_luminance"])
+        / max(1.0 - after_gain["mean_luminance"], 1e-6),
+    )
+    p10_mix = max(
+        0.0,
+        (policy.target_p10_luminance - after_gain["p10_luminance"])
+        / max(1.0 - after_gain["p10_luminance"], 1e-6),
+    )
+    white_mix = min(max(mean_mix, p10_mix), policy.maximum_white_mix)
+    if white_mix > 0.0:
+        result_rgb = blend_with_white_linear(gained_rgb, white_mix)
+        result = Image.fromarray(result_rgb, mode="RGB")
+    else:
+        result = gained
+    after = _luminance_summary(result)
+    return result, {
+        "applied": True,
+        "policy": asdict(policy),
+        "before": before,
+        "after_gain": after_gain,
+        "after": after,
+        "requested_chromaticity_gain": float(requested_gain),
+        "mean_effective_chromaticity_gain": float(np.mean(effective_gain)),
+        "white_mix": float(white_mix),
+    }
 
 
 @dataclass(frozen=True, slots=True)

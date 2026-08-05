@@ -560,8 +560,116 @@ class PipelineTests(SamplePaletteTestCase):
                 [[239, 177, 203], [255, 226, 70], [74, 214, 112], [72, 156, 235]],
             )
 
+    def test_fast_mode_uses_model_palette_when_no_color_is_explicit(self):
+        class AutoPaletteAgent:
+            calls = 0
+
+            def generate(self, _scene, **_kwargs):
+                type(self).calls += 1
+                return LightingEffectAttributes(
+                    density="middle",
+                    m_intensity=82,
+                    k_intensity=90,
+                    a_intensity=74,
+                    effect=(
+                        "Wide panoramic color field with electric purple on the left, vivid "
+                        "magenta through the center, and dominant bright cyan across the "
+                        "right, forming a smooth horizontal gradient with uniform vertical "
+                        "color, futuristic neon illumination, visual coherence, and an "
+                        "uninterrupted luminous surface throughout."
+                    ),
+                    concept_prompt=(
+                        "Cinematic futuristic neon city street with reflective surfaces, "
+                        "layered architecture, electric purple, vivid magenta, and bright "
+                        "cyan lighting, realistic detail and depth."
+                    ),
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            agent = AutoPaletteAgent()
+            pipeline = LightingDemoPipeline(
+                sdl_path=Path(directory) / "missing_sdl.txt",
+                output_root=Path(directory) / "outputs",
+                generator_factory=FakeGenerator,
+                fast_mode=True,
+                auto_palette_agent_factory=lambda: agent,
+            )
+            result = pipeline.run("赛博朋克", 1220, 370, seed=42, steps=4)
+            report = json.loads(result.report_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(result.prompt_source, "deepseek_auto_palette")
+            self.assertEqual(agent.calls, 1)
+            self.assertIn("electric purple", result.prompt)
+            self.assertEqual(
+                report["module_01_auto_palette"]["reason"],
+                "model_selected_palette",
+            )
+
+    def test_explicit_color_skips_model_palette(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LightingDemoPipeline(
+                sdl_path=Path(directory) / "missing_sdl.txt",
+                output_root=Path(directory) / "outputs",
+                generator_factory=FakeGenerator,
+                fast_mode=True,
+                auto_palette_agent_factory=lambda: (_ for _ in ()).throw(
+                    AssertionError("auto palette model must not be constructed")
+                ),
+            )
+            result = pipeline.run("绿色森林", 1220, 370, seed=42, steps=4)
+
+            self.assertEqual(result.prompt_source, "local_explicit_colors")
+            self.assertIn("bright green", result.prompt)
+
+    def test_failed_model_palette_uses_semantic_style_fallback(self):
+        class FailingAgent:
+            def generate(self, _scene, **_kwargs):
+                raise RuntimeError("offline")
+
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LightingDemoPipeline(
+                sdl_path=Path(directory) / "missing_sdl.txt",
+                output_root=Path(directory) / "outputs",
+                generator_factory=FakeGenerator,
+                fast_mode=True,
+                auto_palette_agent_factory=FailingAgent,
+            )
+            result = pipeline.run("赛博朋克", 1220, 370, seed=42, steps=4)
+            report = json.loads(result.report_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(result.prompt_source, "local_semantic_palette_fallback")
+            self.assertIn("electric purple", result.prompt)
+            self.assertIn("bright cyan", result.prompt)
+            self.assertEqual(
+                report["module_01_auto_palette"]["reason"],
+                "unexpected_model_failure",
+            )
+
 
 class AppTests(SamplePaletteTestCase):
+    def test_metrics_expose_dynamic_brightness_floor(self):
+        metrics = _format_metrics(
+            {
+                "mapping_available": False,
+                "pixel_count": 100,
+            },
+            color_guidance={
+                "brightness_floor": {
+                    "applied": True,
+                    "policy": {"mode": "energetic"},
+                    "before": {"mean_luminance": 0.145},
+                    "after": {
+                        "mean_luminance": 0.32,
+                        "below_0_20_fraction": 0.0,
+                    },
+                }
+            },
+        )
+
+        self.assertEqual(metrics["Raw 亮度策略"], "活力/霓虹场景")
+        self.assertEqual(metrics["Raw 自动增亮"], "已启用")
+        self.assertEqual(metrics["Raw 平均亮度（最终）"], 0.32)
+
     def test_gradio_app_builds_without_loading_the_diffusion_model(self):
         with tempfile.TemporaryDirectory() as directory:
             pipeline = LightingDemoPipeline(
@@ -580,6 +688,7 @@ class AppTests(SamplePaletteTestCase):
         )
         self.assertEqual(str(args.sdl_path), r"C:\private\SDL2_0.txt")
         self.assertTrue(args.require_sdl)
+        self.assertEqual(args.auto_palette_timeout_seconds, 2.0)
 
     def test_metrics_do_not_claim_sdl_compliance_in_preview_mode(self):
         metrics = _format_metrics(

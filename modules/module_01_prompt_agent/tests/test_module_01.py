@@ -19,7 +19,10 @@ from modules.module_01_prompt_agent.src.prompt_builder import (
     build_system_prompt,
     build_user_prompt,
 )
-from modules.module_01_prompt_agent.src.fast_compiler import FastPromptCompiler
+from modules.module_01_prompt_agent.src.fast_compiler import (
+    FastPromptCompiler,
+    has_explicit_color_cue,
+)
 from modules.module_01_prompt_agent.src.schemas import (
     LightingEffectAttributes,
     LightingEffectValidationError,
@@ -227,6 +230,48 @@ class PromptTests(unittest.TestCase):
         self.assertIn("bright green", result.effect)
         self.assertIn("flowers", result.concept_prompt)
         self.assertIn("bright green", result.concept_prompt)
+
+    def test_blue_sky_and_clouds_compile_to_an_outdoor_sky_scene(self):
+        result = FastPromptCompiler().generate("蓝天白云")
+
+        self.assertIn("vast blue sky", result.concept_prompt)
+        self.assertIn("sky fills the entire frame", result.concept_prompt)
+        self.assertIn("no ground, water", result.concept_prompt)
+        self.assertNotIn("matching the described activity", result.concept_prompt)
+        self.assertIn("bright blue", result.effect)
+        self.assertIn("soft white", result.effect)
+
+    def test_fast_compiler_recognizes_representative_scene_categories(self):
+        cases = {
+            "雪山日照": "mountain landscape",
+            "安静的湖边": "waterside landscape",
+            "城市街道夜景": "urban outdoor setting",
+            "机场候机大厅": "transport hub",
+            "医院候诊区": "healthcare environment",
+            "博物馆展览": "museum or gallery",
+            "学校图书馆": "learning space",
+            "工厂生产线": "industrial workspace",
+        }
+
+        for scene, expected in cases.items():
+            with self.subTest(scene=scene):
+                result = FastPromptCompiler().generate(scene)
+                self.assertIn(expected, result.concept_prompt)
+
+    def test_color_detection_distinguishes_explicit_color_from_style(self):
+        self.assertTrue(has_explicit_color_cue("蓝色赛博朋克"))
+        self.assertTrue(has_explicit_color_cue("blue cyberpunk"))
+        self.assertFalse(has_explicit_color_cue("赛博朋克"))
+        self.assertFalse(has_explicit_color_cue("未来主义城市"))
+
+    def test_local_cyberpunk_fallback_is_cool_neon_not_warm(self):
+        result = FastPromptCompiler().generate("赛博朋克")
+
+        self.assertIn("electric purple", result.effect)
+        self.assertIn("vivid magenta", result.effect)
+        self.assertIn("bright cyan", result.effect)
+        self.assertIn("futuristic city", result.concept_prompt)
+        self.assertNotIn("warm yellow", result.effect)
 
     def test_rejects_caption_without_spatial_structure(self):
         raw = dict(

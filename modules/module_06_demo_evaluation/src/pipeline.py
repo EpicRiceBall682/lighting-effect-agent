@@ -26,8 +26,19 @@ from PIL import Image
 from PIL import ImageDraw
 
 from modules.module_01_prompt_agent.src.agent import LightingPromptAgent
-from modules.module_01_prompt_agent.src.fast_compiler import FastPromptCompiler
-from modules.module_01_prompt_agent.src.schemas import LightingEffectAttributes
+from modules.module_01_prompt_agent.src.client import (
+    DeepSeekClient,
+    ModelClientError,
+    ModelConfigurationError,
+)
+from modules.module_01_prompt_agent.src.fast_compiler import (
+    FastPromptCompiler,
+    has_explicit_color_cue,
+)
+from modules.module_01_prompt_agent.src.schemas import (
+    LightingEffectAttributes,
+    LightingEffectValidationError,
+)
 from modules.module_03_image_generation.src.config import (
     DEFAULT_NEGATIVE_PROMPT,
     GenerationConfig,
@@ -132,6 +143,7 @@ class DemoPipelineResult:
 
     run_dir: Path
     prompt: str
+    prompt_source: str
     attributes: dict[str, Any]
     concept_image_path: Path
     concept_manifest_path: Path
@@ -270,6 +282,8 @@ class LightingDemoPipeline:
         mapper_factory: Callable[[SDLPalette], Any] = GamutMapper,
         pattern_generator: Any | None = None,
         fast_prompt_compiler: Any | None = None,
+        auto_palette_agent_factory: Callable[[], Any] | None = None,
+        auto_palette_timeout_seconds: float = 2.0,
         lora_scale: float = 0.8,
         allow_missing_sdl: bool = True,
         fast_mode: bool = False,
@@ -286,6 +300,10 @@ class LightingDemoPipeline:
         self.mapper_factory = mapper_factory
         self.pattern_generator = pattern_generator or PatternGenerator()
         self.fast_prompt_compiler = fast_prompt_compiler or FastPromptCompiler()
+        self.auto_palette_agent_factory = auto_palette_agent_factory
+        self.auto_palette_timeout_seconds = float(auto_palette_timeout_seconds)
+        if self.auto_palette_timeout_seconds <= 0:
+            raise ValueError("auto_palette_timeout_seconds must be greater than zero")
         self.lora_scale = lora_scale
         self.allow_missing_sdl = bool(allow_missing_sdl)
         self.fast_mode = bool(fast_mode)
@@ -296,6 +314,11 @@ class LightingDemoPipeline:
         self._previous_image: Image.Image | None = None
         self._previous_scene: str | None = None
         self._previous_prompt: str | None = None
+        self._auto_palette_agent: Any | None = None
+        self._auto_palette_cache: dict[
+            tuple[str, float | None, float | None, float | None],
+            LightingEffectAttributes,
+        ] = {}
 
     def warmup(self) -> None:
         """Load models, the fast concept adapter, and SDL data before the first click."""
@@ -317,6 +340,7 @@ class LightingDemoPipeline:
     def _generate_fast_light(
         self,
         *,
+        scene: str,
         shared_plan: StructuredGradientPlan,
         palette_report: dict[str, object],
         output_dir: Path,
@@ -328,6 +352,7 @@ class LightingDemoPipeline:
             palette_report,
             width=config.width,
             height=config.height,
+            scene=scene,
         )
         quality = analyze_image_quality(image)
         image_path = output_dir / f"raw_light_effect_seed_{config.seed}.png"
@@ -376,6 +401,92 @@ class LightingDemoPipeline:
             load_macos_launchctl_api_key()
             self.prompt_agent = self.prompt_agent_factory()
         return self.prompt_agent
+
+    def _get_auto_palette_agent(self) -> Any:
+        if self._auto_palette_agent is not None:
+            return self._auto_palette_agent
+        load_macos_launchctl_api_key()
+        if self.auto_palette_agent_factory is not None:
+            agent = self.auto_palette_agent_factory()
+        else:
+            client = DeepSeekClient(
+                timeout_seconds=self.auto_palette_timeout_seconds,
+                max_retries=0,
+            )
+            agent = LightingPromptAgent(client=client, validation_retries=0)
+        self._auto_palette_agent = agent
+        return agent
+
+    def _compile_fast_attributes(
+        self,
+        scene: str,
+        *,
+        hardware_width_mm: float | None,
+        hardware_height_mm: float | None,
+        space_size_m2: float | None,
+        forbidden_effects: Sequence[str],
+        forbidden_design_effects: Sequence[str],
+    ) -> tuple[LightingEffectAttributes, str, dict[str, Any]]:
+        if has_explicit_color_cue(scene):
+            attributes = self.fast_prompt_compiler.generate(
+                scene,
+                hardware_width_mm=hardware_width_mm,
+                hardware_height_mm=hardware_height_mm,
+                space_size_m2=space_size_m2,
+                forbidden_effects=forbidden_effects,
+                forbidden_design_effects=forbidden_design_effects,
+            )
+            return attributes, "local_explicit_colors", {
+                "attempted": False,
+                "reason": "explicit_user_colors",
+            }
+
+        cache_key = (
+            " ".join(scene.casefold().split()),
+            hardware_width_mm,
+            hardware_height_mm,
+            space_size_m2,
+        )
+        cached = self._auto_palette_cache.get(cache_key)
+        if cached is not None:
+            return cached, "deepseek_auto_palette_cache", {
+                "attempted": False,
+                "reason": "cache_hit",
+            }
+
+        try:
+            attributes = self._get_auto_palette_agent().generate(
+                scene,
+                hardware_width_mm=hardware_width_mm,
+                hardware_height_mm=hardware_height_mm,
+                space_size_m2=space_size_m2,
+                forbidden_effects=forbidden_effects,
+                forbidden_design_effects=forbidden_design_effects,
+            )
+            self._auto_palette_cache[cache_key] = attributes
+            return attributes, "deepseek_auto_palette", {
+                "attempted": True,
+                "reason": "model_selected_palette",
+            }
+        except ModelConfigurationError:
+            fallback_reason = "missing_api_key"
+        except (ModelClientError, LightingEffectValidationError, TimeoutError):
+            fallback_reason = "model_timeout_request_or_validation_failure"
+        except Exception:
+            fallback_reason = "unexpected_model_failure"
+
+        attributes = self.fast_prompt_compiler.generate(
+            scene,
+            hardware_width_mm=hardware_width_mm,
+            hardware_height_mm=hardware_height_mm,
+            space_size_m2=space_size_m2,
+            forbidden_effects=forbidden_effects,
+            forbidden_design_effects=forbidden_design_effects,
+        )
+        return attributes, "local_semantic_palette_fallback", {
+            "attempted": True,
+            "reason": fallback_reason,
+        }
 
     def _get_generator(self) -> Any:
         if self._generator is None:
@@ -525,6 +636,10 @@ class LightingDemoPipeline:
         )
         with self._run_lock, self._managed_run_dir() as run_dir:
             palette_notice = scene_palette_notice(scene)
+            auto_palette_report: dict[str, Any] = {
+                "attempted": False,
+                "reason": "not_applicable",
+            }
             stage_started = time.perf_counter()
             if prompt_override is not None:
                 self._notify(progress, 0.08, "模块一：正在校验编辑后的提示词")
@@ -536,20 +651,27 @@ class LightingDemoPipeline:
                 prompt_source = "user_edited"
             else:
                 self._notify(progress, 0.08, "模块一：正在理解中文场景")
-                prompt_compiler = (
-                    self.fast_prompt_compiler
-                    if self.fast_mode
-                    else self._get_prompt_agent()
-                )
-                attributes = prompt_compiler.generate(
-                    scene,
-                    hardware_width_mm=width_mm,
-                    hardware_height_mm=height_mm,
-                    space_size_m2=space_size_m2,
-                    forbidden_effects=forbidden_prompts,
-                    forbidden_design_effects=forbidden_prompt_designs,
-                )
-                prompt_source = "local_fast_compiler" if self.fast_mode else "deepseek"
+                if self.fast_mode:
+                    attributes, prompt_source, auto_palette_report = (
+                        self._compile_fast_attributes(
+                            scene,
+                            hardware_width_mm=width_mm,
+                            hardware_height_mm=height_mm,
+                            space_size_m2=space_size_m2,
+                            forbidden_effects=forbidden_prompts,
+                            forbidden_design_effects=forbidden_prompt_designs,
+                        )
+                    )
+                else:
+                    attributes = self._get_prompt_agent().generate(
+                        scene,
+                        hardware_width_mm=width_mm,
+                        hardware_height_mm=height_mm,
+                        space_size_m2=space_size_m2,
+                        forbidden_effects=forbidden_prompts,
+                        forbidden_design_effects=forbidden_prompt_designs,
+                    )
+                    prompt_source = "deepseek_quality_mode"
             timings["prompt_seconds"] = time.perf_counter() - stage_started
             attributes_dict = attributes.to_dict()
             prompt_json_path = run_dir / "module_01_prompt.json"
@@ -622,6 +744,7 @@ class LightingDemoPipeline:
                 self._notify(progress, 0.56, "正在复用共享色彩蓝图生成光色图")
                 stage_started = time.perf_counter()
                 generation = self._generate_fast_light(
+                    scene=scene,
                     shared_plan=shared_plan,
                     palette_report=palette_report,
                     output_dir=run_dir,
@@ -926,6 +1049,7 @@ class LightingDemoPipeline:
                 "palette_notice": palette_notice,
                 "module_01": attributes_dict,
                 "module_01_prompt_source": prompt_source,
+                "module_01_auto_palette": auto_palette_report,
                 "concept_image": {
                     "path": str(concept_image_path),
                     "source_path": str(concept_source_image_path),
@@ -1084,6 +1208,7 @@ class LightingDemoPipeline:
             return DemoPipelineResult(
                 run_dir=run_dir,
                 prompt=attributes.effect,
+                prompt_source=prompt_source,
                 attributes=attributes_dict,
                 concept_image_path=concept_image_path,
                 concept_manifest_path=concept_manifest_path,

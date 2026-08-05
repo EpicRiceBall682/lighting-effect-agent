@@ -34,6 +34,24 @@ def relative_luminance_rgb8(rgb: np.ndarray) -> np.ndarray:
     )
 
 
+def blend_with_white_linear(rgb: np.ndarray, strength: float) -> np.ndarray:
+    """Lift sRGB pixels toward white in linear light with one uniform strength."""
+
+    values = np.asarray(rgb, dtype=np.float32)
+    if values.ndim != 3 or values.shape[2] != 3:
+        raise ValueError("rgb must have shape (height, width, 3)")
+    amount = float(strength)
+    if not np.isfinite(amount) or not 0.0 <= amount <= 1.0:
+        raise ValueError("strength must be a finite value between zero and one")
+    if not bool(np.all(np.isfinite(values))):
+        raise ValueError("rgb must contain only finite values")
+
+    linear = _srgb_to_linear(np.clip(values / 255.0, 0.0, 1.0))
+    lifted = linear + (1.0 - linear) * amount
+    encoded = np.clip(_linear_to_srgb(lifted), 0.0, 1.0)
+    return np.rint(encoded * 255.0).astype(np.uint8)
+
+
 def apply_chromaticity_preserving_gain(
     rgb: np.ndarray,
     gain: np.ndarray,

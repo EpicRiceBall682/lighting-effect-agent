@@ -12,6 +12,7 @@ from modules.color_vocabulary import COLOR_RGB, matched_color_spans
 from .structured_gradient import (
     GradientStop,
     StructuredGradientPlan,
+    apply_scene_brightness_floor,
     render_base_gradient,
     structured_gradient_metrics,
 )
@@ -191,16 +192,19 @@ def render_shared_palette_gradient(
     *,
     width: int,
     height: int,
+    scene: str = "",
 ) -> tuple[Image.Image, dict[str, object]]:
     """Render a light field from the exact blueprint used to harmonize the concept."""
 
-    image = render_base_gradient(plan, width=width, height=height)
+    base_image = render_base_gradient(plan, width=width, height=height)
+    image, brightness_report = apply_scene_brightness_floor(base_image, scene)
     report = dict(palette_report)
     report.update(
         {
             "applied": True,
             "render_mode": "shared_palette_fast_gradient",
             "quality_status": "accepted",
+            "brightness_floor": brightness_report,
             "final_metrics": structured_gradient_metrics(image),
             "effective_texture_strength": 0.0,
             "post_guidance_layout_error": None,

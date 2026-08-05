@@ -122,13 +122,48 @@ def _format_metrics(
     raw_quality: dict[str, Any] | None = None,
     color_guidance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    brightness_metrics: dict[str, Any] = {}
+    if color_guidance:
+        brightness = dict(color_guidance.get("brightness_floor", {}))
+        if brightness:
+            policy = dict(brightness.get("policy", {}))
+            before = dict(brightness.get("before", {}))
+            after = dict(brightness.get("after", {}))
+            policy_labels = {
+                "standard": "普通场景",
+                "energetic": "活力/霓虹场景",
+                "intentional_dark": "明确暗场景",
+            }
+            brightness_metrics = {
+                "Raw 亮度策略": policy_labels.get(
+                    str(policy.get("mode", "")),
+                    str(policy.get("mode", "未知")),
+                ),
+                "Raw 自动增亮": (
+                    "已启用" if brightness.get("applied") else "无需调整"
+                ),
+                "Raw 平均亮度（处理前）": round(
+                    float(before.get("mean_luminance", 0.0)),
+                    4,
+                ),
+                "Raw 平均亮度（最终）": round(
+                    float(after.get("mean_luminance", 0.0)),
+                    4,
+                ),
+                "Raw 最终低亮区域比例": round(
+                    float(after.get("below_0_20_fraction", 0.0)) * 100,
+                    3,
+                ),
+            }
     if quality.get("mapping_available") is False:
-        return {
+        metrics = {
             "SDL 映射状态": "未运行（缺少本地 SDL 色表）",
             "当前输出": "模块三 Raw 与模块五主题预览",
             "硬件色域保证": "无；配置 SDL 色表后才可验证",
             "输出尺寸": f'{quality.get("pixel_count", 0)} pixels',
         }
+        metrics.update(brightness_metrics)
+        return metrics
     metrics = {
         "SDL 严格无效像素": int(quality["strict_invalid_pixel_count"]),
         "映射前超出 SDL 色域比例": round(
@@ -184,6 +219,7 @@ def _format_metrics(
         plan = dict(color_guidance.get("plan", {}))
         if plan.get("dominant_color"):
             metrics["Raw 主色"] = str(plan["dominant_color"])
+    metrics.update(brightness_metrics)
     return metrics
 
 
@@ -244,6 +280,18 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                 f" SDL 严格无效像素为 "
                 f"`{result.quality['strict_invalid_pixel_count']}`。"
             )
+        if result.prompt_source in {
+            "deepseek_auto_palette",
+            "deepseek_auto_palette_cache",
+        }:
+            status += "\n\n🎨 未检测到明确颜色，本次由模块一大模型自动配色。"
+        elif result.prompt_source == "local_semantic_palette_fallback":
+            status += (
+                "\n\n🎨 未检测到明确颜色；模块一大模型不可用或超时，"
+                "本次使用本地场景与风格语义配色。"
+            )
+        elif result.prompt_source == "local_explicit_colors":
+            status += "\n\n🎨 已严格保留用户输入中的明确颜色。"
         if result.color_guidance.get("render_mode") == (
             "structured_horizontal_gradient_with_lora_luminance"
         ):
@@ -642,6 +690,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="fast returns a concept image plus a concept-derived light field",
     )
     parser.add_argument("--time-budget-seconds", type=float, default=6.0)
+    parser.add_argument(
+        "--auto-palette-timeout-seconds",
+        type=float,
+        default=2.0,
+        help="maximum DeepSeek wait when fast mode has no explicit color",
+    )
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument(
         "--sdl-path",
@@ -672,6 +726,7 @@ def main(argv: list[str] | None = None) -> None:
         allow_missing_sdl=not args.require_sdl,
         fast_mode=args.generation_mode == "fast",
         time_budget_seconds=args.time_budget_seconds,
+        auto_palette_timeout_seconds=args.auto_palette_timeout_seconds,
     )
     pipeline.warmup()
     demo = build_demo(pipeline)

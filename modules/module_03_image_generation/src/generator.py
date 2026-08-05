@@ -234,6 +234,39 @@ class LightEffectGenerator:
             getattr(self.pipeline, "_concept_lcm_available", False)
         )
         acceleration = "lcm_lora_4_step" if lcm_available else "dpm_short_schedule"
+        negative_terms = [
+            "text",
+            "letters",
+            "logo",
+            "watermark",
+            "deformed objects",
+            "duplicate people",
+            "low detail",
+            "oversaturated",
+            "underexposed",
+        ]
+        lowered_prompt = prompt.casefold()
+        if any(
+            marker in lowered_prompt
+            for marker in (
+                "outdoor",
+                "open-air",
+                "sky-dominant",
+                "sky fills the entire frame",
+                "landscape",
+                "seaside",
+                "coastal",
+                "exterior city",
+            )
+        ):
+            negative_terms.extend(
+                ["interior", "indoor room", "furniture", "walls", "ceiling"]
+            )
+        if "sky-dominant" in lowered_prompt:
+            negative_terms.extend(["ocean", "sea", "lake", "beach", "indoor scene"])
+        if "sky fills the entire frame" in lowered_prompt:
+            negative_terms.extend(["ground", "terrain", "road", "floor", "horizon"])
+        negative_prompt = ", ".join(negative_terms)
         started = time.perf_counter()
         try:
             if lcm_available:
@@ -255,10 +288,7 @@ class LightEffectGenerator:
             generator = torch.Generator(device="cpu").manual_seed(int(seed))
             output = self.pipeline(
                 prompt=prompt.strip(),
-                negative_prompt=(
-                    "text, letters, logo, watermark, deformed objects, duplicate people, "
-                    "low detail, oversaturated, underexposed"
-                ),
+                negative_prompt=negative_prompt,
                 width=width,
                 height=height,
                 num_inference_steps=steps,
@@ -283,6 +313,7 @@ class LightEffectGenerator:
             json.dumps(
                 {
                     "prompt": prompt.strip(),
+                    "negative_prompt": negative_prompt,
                     "seed": int(seed),
                     "width": width,
                     "height": height,

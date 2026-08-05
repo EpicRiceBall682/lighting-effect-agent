@@ -10,6 +10,7 @@ from modules.module_03_image_generation.src.config import GenerationConfig
 from modules.module_03_image_generation.src.concept_palette import (
     build_concept_palette_plan,
     harmonize_concept_image,
+    render_shared_palette_gradient,
 )
 from modules.module_03_image_generation.src.generator import (
     attribute_prompt_fragments,
@@ -29,11 +30,14 @@ from modules.module_03_image_generation.src.quality import (
     suppress_isolated_chroma_artifacts,
 )
 from modules.module_03_image_generation.src.structured_gradient import (
+    apply_scene_brightness_floor,
     build_structured_gradient_plan,
     render_base_gradient,
     render_structured_gradient,
+    scene_brightness_policy,
     structured_gradient_metrics,
 )
+from modules.linear_luminance import relative_luminance_rgb8
 from modules.module_03_image_generation.src.scene_to_image_cli import (
     build_parser as build_scene_parser,
     run_scene_pipeline,
@@ -241,6 +245,78 @@ class CliTests(unittest.TestCase):
 
 
 class QualityTests(unittest.TestCase):
+    def test_scene_brightness_policy_distinguishes_energy_and_dark_intent(self):
+        self.assertEqual(
+            scene_brightness_policy("健身房，抽象能量、节奏光效").mode,
+            "energetic",
+        )
+        self.assertEqual(
+            scene_brightness_policy("晚餐，暖色、暗调、私密样式光").mode,
+            "intentional_dark",
+        )
+        self.assertEqual(
+            scene_brightness_policy("酒店大堂，晨雾样式天光").mode,
+            "standard",
+        )
+
+    def test_energetic_dark_blue_gradient_is_brightened_without_layout_change(self):
+        import numpy as np
+        from PIL import Image
+
+        source = Image.new("RGB", (320, 96), (38, 92, 145))
+        result, report = apply_scene_brightness_floor(
+            source,
+            "服装零售陈列区，霓虹样式光，用于营造色彩、街头感",
+        )
+        luminance = relative_luminance_rgb8(np.asarray(result, dtype=np.float32))
+
+        self.assertTrue(report["applied"])
+        self.assertEqual(report["policy"]["mode"], "energetic")
+        self.assertGreaterEqual(float(luminance.mean()), 0.315)
+        self.assertGreaterEqual(float(np.quantile(luminance, 0.10)), 0.195)
+        self.assertEqual(result.getpixel((0, 48)), result.getpixel((319, 48)))
+        self.assertGreater(result.getpixel((160, 48))[2], result.getpixel((160, 48))[0])
+
+    def test_intentional_dark_scene_uses_lower_brightness_floor(self):
+        import numpy as np
+        from PIL import Image
+
+        source = Image.new("RGB", (160, 48), (38, 92, 145))
+        energetic, _ = apply_scene_brightness_floor(source, "霓虹能量健身房")
+        dark, report = apply_scene_brightness_floor(source, "夜晚暗调私密微光")
+        energetic_mean = float(
+            relative_luminance_rgb8(np.asarray(energetic, dtype=np.float32)).mean()
+        )
+        dark_mean = float(
+            relative_luminance_rgb8(np.asarray(dark, dtype=np.float32)).mean()
+        )
+
+        self.assertEqual(report["policy"]["mode"], "intentional_dark")
+        self.assertGreaterEqual(dark_mean, 0.235)
+        self.assertLess(dark_mean, energetic_mean)
+
+    def test_shared_palette_report_records_brightness_floor(self):
+        from PIL import Image
+
+        plan, palette_report = build_concept_palette_plan(
+            Image.new("RGB", (256, 144), (30, 80, 140)),
+            "soft magenta on the left and dominant bright blue across the right",
+        )
+        result, report = render_shared_palette_gradient(
+            plan,
+            palette_report,
+            width=320,
+            height=96,
+            scene="健身房，抽象能量光效",
+        )
+
+        self.assertEqual(result.size, (320, 96))
+        self.assertEqual(report["brightness_floor"]["policy"]["mode"], "energetic")
+        self.assertGreaterEqual(
+            report["brightness_floor"]["after"]["mean_luminance"],
+            0.315,
+        )
+
     def test_structured_plan_keeps_dominant_color_across_center_and_right(self):
         from PIL import Image
 
