@@ -9,6 +9,8 @@ from modules.module_03_image_generation.src.cli import _dimensions, build_parser
 from modules.module_03_image_generation.src.config import GenerationConfig
 from modules.module_03_image_generation.src.concept_palette import (
     build_concept_palette_plan,
+    build_extracted_concept_palette_plan,
+    compile_light_effect_prompt,
     harmonize_concept_image,
     render_shared_palette_gradient,
 )
@@ -103,6 +105,32 @@ class ConfigTests(unittest.TestCase):
             self.assertLessEqual(max(abs(a - b) for a, b in zip(stop.rgb, target)), 18)
         self.assertEqual(report["requested_color_weight"], 1.0)
 
+    def test_one_model_selected_color_is_not_filled_with_concept_colors(self):
+        from PIL import Image
+
+        plan, report = build_concept_palette_plan(
+            Image.new("RGB", (256, 144), (30, 170, 220)),
+            "dominant warm red across the entire panel",
+        )
+
+        self.assertEqual(len(plan.stops), 1)
+        self.assertEqual(plan.dominant_color, "warm red")
+        self.assertEqual(plan.stops[0].rgb, (239, 62, 67))
+        self.assertEqual(report["final_colors"], [[239, 62, 67]])
+
+    def test_generic_repetition_does_not_dilute_a_modified_color_choice(self):
+        from PIL import Image
+
+        plan, _report = build_concept_palette_plan(
+            Image.new("RGB", (256, 144), (30, 170, 220)),
+            "A panoramic field dominated by pure red across the entire panel. "
+            "The red is uniform and saturated, with no secondary hues.",
+        )
+
+        self.assertEqual(len(plan.stops), 1)
+        self.assertEqual(plan.dominant_color, "pure red")
+        self.assertEqual(plan.stops[0].rgb, (255, 0, 0))
+
     def test_concept_harmonization_reduces_palette_error_and_keeps_luminance(self):
         import numpy as np
         from PIL import Image
@@ -119,6 +147,41 @@ class ConfigTests(unittest.TestCase):
         self.assertGreater(report["chroma_error_reduction_fraction"], 0.75)
         self.assertLessEqual(np.abs(source_luma - result_luma).max(), 2)
         self.assertEqual(harmonized.size, source.size)
+
+    def test_concept_first_plan_and_prompt_use_only_original_image_colors(self):
+        import numpy as np
+        from PIL import Image
+
+        array = np.zeros((90, 300, 3), dtype=np.uint8)
+        array[:, :100] = (230, 110, 90)
+        array[:, 100:200] = (100, 180, 120)
+        array[:, 200:] = (80, 135, 220)
+        plan, report = build_extracted_concept_palette_plan(Image.fromarray(array))
+        prompt = compile_light_effect_prompt(plan)
+
+        self.assertEqual(plan.source, "concept_image_extracted_palette")
+        self.assertEqual(report["palette_source"], "original_concept_image_only")
+        self.assertEqual(len(plan.stops), 3)
+        self.assertEqual(
+            report["final_colors"],
+            [list(stop.rgb) for stop in plan.stops],
+        )
+        self.assertIn("derived from the concept scene palette", prompt)
+        self.assertIn("smooth horizontal gradient", prompt)
+
+    def test_concept_palette_prefers_illuminated_material_over_dark_structure(self):
+        import numpy as np
+        from PIL import Image
+
+        array = np.zeros((90, 300, 3), dtype=np.uint8)
+        array[:, :100] = (96, 50, 20)
+        array[55:, :100] = (180, 145, 110)
+        array[:, 100:200] = (205, 235, 240)
+        array[:, 200:] = (225, 245, 232)
+        plan, _report = build_extracted_concept_palette_plan(Image.fromarray(array))
+
+        self.assertGreater(plan.stops[0].rgb[0], 150)
+        self.assertNotEqual(plan.stops[0].color_name, "deep red")
 
     def test_tokenizer_limit_drops_optional_controls_instead_of_truncating(self):
         class FakeTokenizer:
@@ -277,6 +340,16 @@ class QualityTests(unittest.TestCase):
         self.assertEqual(result.getpixel((0, 48)), result.getpixel((319, 48)))
         self.assertGreater(result.getpixel((160, 48))[2], result.getpixel((160, 48))[0])
 
+    def test_saturated_red_is_not_whitened_because_of_luminance_weighting(self):
+        from PIL import Image
+
+        source = Image.new("RGB", (160, 48), (255, 0, 0))
+        result, report = apply_scene_brightness_floor(source, "红色主题光效")
+
+        self.assertFalse(report["applied"])
+        self.assertEqual(report["before"]["mean_channel_peak"], 1.0)
+        self.assertEqual(result.getpixel((80, 24)), (255, 0, 0))
+
     def test_intentional_dark_scene_uses_lower_brightness_floor(self):
         import numpy as np
         from PIL import Image
@@ -292,7 +365,7 @@ class QualityTests(unittest.TestCase):
         )
 
         self.assertEqual(report["policy"]["mode"], "intentional_dark")
-        self.assertGreaterEqual(dark_mean, 0.235)
+        self.assertFalse(report["applied"])
         self.assertLess(dark_mean, energetic_mean)
 
     def test_shared_palette_report_records_brightness_floor(self):
@@ -312,9 +385,10 @@ class QualityTests(unittest.TestCase):
 
         self.assertEqual(result.size, (320, 96))
         self.assertEqual(report["brightness_floor"]["policy"]["mode"], "energetic")
+        self.assertFalse(report["brightness_floor"]["applied"])
         self.assertGreaterEqual(
-            report["brightness_floor"]["after"]["mean_luminance"],
-            0.315,
+            report["brightness_floor"]["after"]["mean_channel_peak"],
+            0.74,
         )
 
     def test_structured_plan_keeps_dominant_color_across_center_and_right(self):
@@ -334,6 +408,20 @@ class QualityTests(unittest.TestCase):
         self.assertEqual(plan.dominant_color, "vivid magenta")
         self.assertEqual([stop.position for stop in plan.stops], [0.0, 0.5, 1.0])
         self.assertEqual(plan.stops[-1].rgb, plan.stops[-2].rgb)
+
+    def test_single_color_plan_does_not_invent_a_lighter_companion(self):
+        from PIL import Image
+
+        plan = build_structured_gradient_plan(
+            "Wide panoramic color field with dominant warm red across the entire panel, "
+            "forming a clean smooth horizontal gradient with uniform vertical color and "
+            "an uninterrupted luminous surface throughout.",
+            Image.new("RGB", (96, 32), (120, 120, 120)),
+        )
+
+        self.assertEqual(plan.source, "single_prompt_color")
+        self.assertEqual(plan.dominant_color, "warm red")
+        self.assertEqual({stop.rgb for stop in plan.stops}, {(239, 62, 67)})
 
     def test_bright_blue_is_preserved_as_the_dominant_color(self):
         from PIL import Image

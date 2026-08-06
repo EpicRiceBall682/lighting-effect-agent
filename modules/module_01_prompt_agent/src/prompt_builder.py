@@ -16,41 +16,47 @@ def build_system_prompt() -> str:
         "output represents a luminaire color field, not a photograph or an illustrated "
         "light effect. Never describe people, furniture, architecture, or objects.\n\n"
         "# Target Appearance #\n"
-        "Use one orderly left-to-right horizontal gradient with two to four named "
-        "colors. Choose one unmistakable dominant color that occupies the center and "
-        "right portion of the panel, plus one secondary color on the left and at most one "
-        "transition color. Keep the entire vertical axis uniform. Do not introduce mist, "
+        "Use one orderly left-to-right horizontal gradient with one to four named "
+        "colors. Decide the palette, saturation, and color relationships independently "
+        "from the complete scene meaning. A single color may occupy the entire panel when "
+        "that is the clearest interpretation; when several colors are useful, give them "
+        "unambiguous horizontal positions and identify the dominant color. Keep the entire "
+        "vertical axis uniform. Do not introduce mist, "
         "bloom, clouds, focal lights, radial illumination, patches, texture, or multiple "
         "competing centers. The scene is expressed through palette choice, saturation, "
         "brightness, and the proportion of the dominant color.\n\n"
         "# Color Requirements #\n"
         f"Use only these exact supported color names: {supported_palette}. "
-        "All hue families are available, including green, cyan, teal, navy, and indigo. "
-        "Energetic scenes should use clean vivid "
-        "colors instead of conservative gray pastels. Calm scenes may use softer colors, "
-        "but they must still have a clear dominant hue. Preserve colors explicitly requested "
-        "by the user and do not substitute one hue family for another.\n\n"
+        "All hue families are equally available, including green, cyan, teal, navy, and "
+        "indigo. Do not apply fixed mappings from an emotion, style, place, or activity to "
+        "a hue family, and do not favor warm, cool, pastel, or vivid colors by default. "
+        "Use your lighting-design judgment for this specific request. Preserve colors that "
+        "the user explicitly requests, but distinguish a requested lighting color from a "
+        "colored object whose name merely appears in the scene.\n\n"
         "# Effect Caption Rules #\n"
+        "The effect field is the final independent lighting-color design. Interpret the same "
+        "user request as the concept image, but choose the light-field palette using lighting "
+        "design judgment rather than copying furniture, walls, plants, or pixel-area ratios "
+        "from the concept scene. The runtime compares both results and only uses concept-image "
+        "colors as a fallback when their dominant hues are severely inconsistent.\n"
         "Write 30 to 50 English words. The caption must:\n"
         "1. Start by describing a wide panoramic organizer-style color field.\n"
-        "2. Name the secondary color on the left.\n"
-        "3. Explicitly call one color dominant or primary across the center and right.\n"
+        "2. For a single-color design, state that it is dominant across the entire panel.\n"
+        "3. For a multi-color design, name each color's horizontal placement and the "
+        "dominant or primary color.\n"
         "4. State that the transition is a smooth horizontal gradient.\n"
         "5. Finish with uniformly clean vertical color and an uninterrupted surface.\n"
-        "Use two colors by default and up to four when the scene clearly calls for them. "
+        "Use one to four colors solely according to the scene rather than a fixed default. "
         "Never say both sides, because left, center, and right must remain unambiguous.\n\n"
         "# Concept Image Prompt #\n"
         "Also write concept_prompt as an 8 to 80 word English scene-image prompt. Unlike "
         "effect, it must retain the real place, objects, plants, people when relevant, and "
-        "the requested atmosphere. It must use the same main color families as effect. "
-        "Do not mention text, logos, brands, or a luminaire panel.\n\n"
-        "# Examples #\n"
-        "Energetic disco -> electric purple on the left and dominant vivid magenta across "
-        "the center and right, with a saturated smooth horizontal gradient.\n"
-        "Cozy coffee shop -> light peach on the left and dominant warm amber across the "
-        "center and right, with a clean soft horizontal gradient.\n"
-        "Clear blue sky -> ivory on the left and dominant light blue across the center and "
-        "right, keeping the panel simple and open without cloud shapes.\n\n"
+        "the requested atmosphere. Treat it as an independent scene-design chain. Use natural, "
+        "physically plausible material and lighting "
+        "colors for the scene. Do not copy the effect field's left-to-right panel layout, do "
+        "not tint every object with one palette, and do not apply a uniform color wash. "
+        "Preserve an explicitly requested environmental light color only where it would "
+        "naturally appear. Do not mention text, logos, brands, or a luminaire panel.\n\n"
         "# Lighting Effect Attributes #\n"
         "- density: 1.38m²=lowest, 18.9m²=low, 31.8m²=middle, 75m²=high\n"
         "- m_intensity: main-lighting brightness percentage from 0 to 100\n"
@@ -60,13 +66,9 @@ def build_system_prompt() -> str:
         "# Output Format #\n"
         "Return only one JSON object with exactly these fields:\n"
         '{"density":"middle","m_intensity":70,"k_intensity":90,'
-        '"a_intensity":60,"effect":"Wide panoramic organizer-style color field with '
-        'electric purple on the left and dominant vivid magenta across the center and '
-        'right, forming a saturated smooth horizontal gradient with uniform vertical '
-        'color, clean illumination, strong visual identity, and an uninterrupted '
-        'surface throughout.","concept_prompt":"A lively contemporary dance venue with '
-        'people moving through vivid purple and magenta ambient light, cinematic interior '
-        'photography, energetic atmosphere, clean composition."}\n'
+        '"a_intensity":60,"effect":"Write the required 30 to 50 word English gradient '
+        'caption here.","concept_prompt":"Write the corresponding English scene-image '
+        'prompt here."}\n'
         "Use JSON integers for all intensity values. Do not add Markdown or explanations."
     )
 
@@ -105,7 +107,9 @@ def build_user_prompt(
     return (
         "Please generate lighting effect attributes for the following request.\n\n"
         + "\n".join(details)
-        + "\n\nIdentify and preserve the scene's main spatial cues before translating unavailable "
-        "literal colors or objects into the permitted abstract palette. Return the attributes "
-        "as the required JSON object, with the effect in English."
+        + "\n\nInterpret the complete request before choosing colors. Select the palette independently "
+        "for this scene without applying a canned style-to-color mapping. Treat a color as "
+        "mandatory only when the user is actually requesting that lighting color, not merely "
+        "mentioning a colored object. Return the attributes as the required JSON object, with "
+        "the effect in English."
     )

@@ -88,12 +88,25 @@ def render_pattern(
     centered = modulation - float(modulation.mean())
     maximum_deviation = max(float(np.max(np.abs(centered))), 1e-6)
     normalized = centered / maximum_deviation
+    # Bend the existing horizontal palette very slightly instead of inventing
+    # new colors. This creates an asymmetric low-frequency flow while keeping
+    # every hue selected by module one.
+    maximum_shift = float(width * attributes.pattern_strength * 0.12)
+    column_grid = np.arange(width, dtype=np.float32)[None, :]
+    source_columns = np.clip(
+        np.rint(column_grid + normalized[:, :, 0] * maximum_shift),
+        0,
+        width - 1,
+    ).astype(np.int32)
+    row_grid = np.arange(height, dtype=np.int32)[:, None]
+    flowed = before[row_grid, source_columns]
     # Multiplying all RGB channels by the same smooth gain preserves local
     # chromaticity. Module five changes rhythm and luminance, never palette.
-    # Keep module-five motion visibly subordinate to the organizer-faithful
-    # gradient. Even at the UI maximum (0.18), luminance moves by at most 5%.
-    gain = 1.0 + attributes.pattern_strength * 0.28 * normalized
-    after_rgb, effective_gain = apply_chromaticity_preserving_gain(before, gain)
+    # Keep module-five motion subordinate to the organizer-faithful gradient,
+    # but visible on otherwise flat fields. At the UI maximum (0.18), the
+    # requested luminance movement remains below 9%.
+    gain = 1.0 + attributes.pattern_strength * 0.45 * normalized
+    after_rgb, effective_gain = apply_chromaticity_preserving_gain(flowed, gain)
     after = after_rgb.astype(np.float32)
     rendered = Image.fromarray(after_rgb, mode="RGB")
 
@@ -106,7 +119,8 @@ def render_pattern(
         "effective_strength": float(attributes.pattern_strength),
         "field_blur_radius": round(max(4.0, height * 0.08), 3),
         "color_mode": "chromaticity_preserving_linear_rgb_gain",
-        "maximum_gain_deviation": float(attributes.pattern_strength * 0.28),
+        "maximum_horizontal_shift_px": maximum_shift,
+        "maximum_gain_deviation": float(attributes.pattern_strength * 0.45),
         "maximum_effective_gain_deviation": float(
             np.max(np.abs(effective_gain - 1.0))
         ),

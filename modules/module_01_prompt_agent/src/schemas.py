@@ -130,9 +130,9 @@ class LightingEffectAttributes:
 
         effect = str(value["effect"]).strip()
         english_words = re.findall(r"[A-Za-z]+(?:[-'][A-Za-z]+)*", effect)
-        if len(english_words) < 30 or len(english_words) > 50:
+        if len(english_words) < 20 or len(english_words) > 60:
             raise LightingEffectValidationError(
-                "effect must contain 30 to 50 English words"
+                "effect must contain 20 to 60 English words"
             )
         if re.search(r"[\u3400-\u9fff]", effect):
             raise LightingEffectValidationError("effect must be written in English")

@@ -281,17 +281,27 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                 f"`{result.quality['strict_invalid_pixel_count']}`。"
             )
         if result.prompt_source in {
-            "deepseek_auto_palette",
-            "deepseek_auto_palette_cache",
+            "deepseek_concept_prompt",
+            "deepseek_concept_prompt_cache",
         }:
-            status += "\n\n🎨 未检测到明确颜色，本次由模块一大模型自动配色。"
-        elif result.prompt_source == "local_semantic_palette_fallback":
             status += (
-                "\n\n🎨 未检测到明确颜色；模块一大模型不可用或超时，"
-                "本次使用本地场景与风格语义配色。"
+                "\n\n🎨 模块一大模型分别生成自然场景提示词和独立光效提示词。"
+            )
+        elif result.prompt_source == "local_concept_prompt_fallback":
+            status += (
+                "\n\n🎨 模块一大模型不可用或超时，本次使用本地应急概念提示词；"
+                "光效提示词仍由独立的本地设计链路生成。"
             )
         elif result.prompt_source == "local_explicit_colors":
             status += "\n\n🎨 已严格保留用户输入中的明确颜色。"
+        if result.color_guidance.get("correction_applied"):
+            comparison = dict(result.color_guidance.get("color_comparison", {}))
+            status += (
+                "\n\n⚠️ 两条链路的主色差异超过安全阈值，已用概念图色板纠正光效；"
+                f"检测色相差约 `{float(comparison.get('dominant_hue_delta_degrees', 0.0)):.1f}°`。"
+            )
+        elif result.color_guidance.get("independent_chains"):
+            status += "\n\n✅ 两条链路颜色差异可接受，光效图保留模块一的独立配色。"
         if result.color_guidance.get("render_mode") == (
             "structured_horizontal_gradient_with_lora_luminance"
         ):
@@ -300,7 +310,7 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                 result.color_guidance.get("effective_texture_strength", 0.0)
             )
             status += (
-                "\n\n模块三已使用参考训练集对齐的横向主渐变；"
+                "\n\n模块三已把独立光效提示词转换为横向主渐变；"
                 f"主色为 `{plan.get('dominant_color', '未标注')}`，"
                 f"LoRA 仅保留 `{texture_strength:.3f}` 强度的低频亮度纹理。"
             )
@@ -443,11 +453,11 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                 <section class="hero">
                   <div class="eyebrow">AI Lighting Lab</div>
                   <h1>一句中文，同时生成概念意象与可落地光色。</h1>
-                  <p>系统先从输入建立共享色彩蓝图，再生成带实体和空间的概念图；概念图与宽幅渐变使用同一组颜色和横向顺序，随后完成主题增强与 SDL 色域处理。</p>
+                  <p>系统用两条独立链路分别生成实体概念图与宽幅光色图；只有双方主色严重冲突时，才使用概念图色板纠正光效，随后完成主题增强与 SDL 色域处理。</p>
                   <div class="step-strip">
-                    <span class="step-chip">01 中文场景 → 共享视觉规格</span>
-                    <span class="step-chip">02 快速实体概念图</span>
-                    <span class="step-chip">03 共享色彩协调 → 宽幅渐变</span>
+                    <span class="step-chip">01 中文场景 → 双提示词</span>
+                    <span class="step-chip">02 独立实体概念图</span>
+                    <span class="step-chip">03 独立光效 → 严重偏色兜底</span>
                     <span class="step-chip">05 低频主题光场增强</span>
                     <span class="step-chip">04 SDL 物理色域映射</span>
                   </div>
@@ -525,10 +535,10 @@ def build_demo(pipeline: LightingDemoPipeline | None = None) -> gr.Blocks:
                         elem_classes=["panel", "status-card"],
                     )
                     palette_notice = gr.Markdown(
-                        "支持绿色、青色及其他色相；概念图和光色图共享颜色与顺序，再由 SDL 处理硬件边界。"
+                        "支持绿色、青色及其他色相；概念图与光色图默认独立配色，仅在严重偏色时自动纠正。"
                     )
                     prompt = gr.Textbox(
-                        label="模块一 · 英文光效提示词（可编辑）",
+                        label="独立光效链路的英文提示词（可编辑）",
                         lines=6,
                         interactive=True,
                         info=(
@@ -693,7 +703,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--auto-palette-timeout-seconds",
         type=float,
-        default=2.0,
+        default=3.0,
         help="maximum DeepSeek wait when fast mode has no explicit color",
     )
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)

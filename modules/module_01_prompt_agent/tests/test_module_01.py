@@ -164,7 +164,7 @@ class SchemaTests(unittest.TestCase):
         ):
             LightingEffectAttributes.from_mapping(raw)
 
-    def test_requires_at_least_thirty_english_words(self):
+    def test_requires_at_least_twenty_english_words(self):
         raw = dict(
             VALID_RESPONSE,
             effect=(
@@ -172,7 +172,7 @@ class SchemaTests(unittest.TestCase):
                 "misty glow, soft orange warmth, and calm illumination."
             ),
         )
-        with self.assertRaisesRegex(LightingEffectValidationError, "30 to 50"):
+        with self.assertRaisesRegex(LightingEffectValidationError, "20 to 60"):
             LightingEffectAttributes.from_mapping(raw)
 
     def test_rejects_direction_that_conflicts_with_color_placement(self):
@@ -216,20 +216,23 @@ class PromptTests(unittest.TestCase):
         self.assertIn("30 to 50 English words", prompt)
         self.assertIn("dominant color", prompt)
         self.assertIn("left-to-right horizontal gradient", prompt)
-        self.assertIn("two to four named colors", prompt)
+        self.assertIn("one to four named colors", prompt)
         self.assertIn("vertical axis uniform", prompt)
-        self.assertIn("Energetic disco", prompt)
+        self.assertIn("Do not apply fixed mappings", prompt)
+        self.assertNotIn("Energetic disco", prompt)
+        self.assertNotIn("Cozy coffee shop", prompt)
         self.assertIn("Do not introduce mist", prompt)
         self.assertTrue(all(name in prompt for name in SUPPORTED_COLOR_NAMES))
         self.assertIn("concept_prompt", prompt)
 
-    def test_fast_compiler_preserves_green_and_builds_concept_prompt(self):
+    def test_fast_compiler_builds_a_natural_unwashed_concept_prompt(self):
         result = FastPromptCompiler().generate(
             "清晨花海，粉色、黄色、绿色和蓝色，清新自然"
         )
         self.assertIn("bright green", result.effect)
         self.assertIn("flowers", result.concept_prompt)
-        self.assertIn("bright green", result.concept_prompt)
+        self.assertIn("physically plausible", result.concept_prompt)
+        self.assertIn("without a uniform color wash", result.concept_prompt)
 
     def test_blue_sky_and_clouds_compile_to_an_outdoor_sky_scene(self):
         result = FastPromptCompiler().generate("蓝天白云")
@@ -263,6 +266,14 @@ class PromptTests(unittest.TestCase):
         self.assertTrue(has_explicit_color_cue("blue cyberpunk"))
         self.assertFalse(has_explicit_color_cue("赛博朋克"))
         self.assertFalse(has_explicit_color_cue("未来主义城市"))
+        self.assertFalse(has_explicit_color_cue("地中海黄昏样式光"))
+
+    def test_local_fallback_does_not_add_a_companion_to_one_explicit_color(self):
+        result = FastPromptCompiler().generate("纯红色主导的宽幅光效")
+
+        self.assertIn("dominant warm red across the entire panel", result.effect)
+        self.assertNotIn("orange", result.effect)
+        self.assertNotIn("pink", result.effect)
 
     def test_local_cyberpunk_fallback_is_cool_neon_not_warm(self):
         result = FastPromptCompiler().generate("赛博朋克")
@@ -272,6 +283,32 @@ class PromptTests(unittest.TestCase):
         self.assertIn("bright cyan", result.effect)
         self.assertIn("futuristic city", result.concept_prompt)
         self.assertNotIn("warm yellow", result.effect)
+
+    def test_local_fallback_uses_semantic_palettes_for_ambiguous_effects(self):
+        compiler = FastPromptCompiler()
+        sunset = compiler.generate("酒店特色餐厅，地中海黄昏样式光")
+        neon = compiler.generate("服装零售陈列区，霓虹样式光")
+        water = compiler.generate("酒店泳池，波光、深度、宁静")
+
+        self.assertIn("warm orange", sunset.effect)
+        self.assertIn("vivid purple", sunset.effect)
+        self.assertIn("electric purple", neon.effect)
+        self.assertIn("bright cyan", neon.effect)
+        self.assertIn("deep navy", water.effect)
+        self.assertIn("light blue", water.effect)
+
+    def test_local_generic_fallback_varies_by_scene_deterministically(self):
+        compiler = FastPromptCompiler()
+        scenes = (
+            "酒店大堂主入口，用于营造归属感",
+            "酒店大堂休息区，用于营造社交舒适",
+            "酒店前台，用于营造品牌第一印象",
+        )
+        first = [compiler.generate(scene).effect for scene in scenes]
+        second = [compiler.generate(scene).effect for scene in scenes]
+
+        self.assertEqual(first, second)
+        self.assertGreater(len(set(first)), 1)
 
     def test_rejects_caption_without_spatial_structure(self):
         raw = dict(
@@ -380,16 +417,15 @@ class AgentTests(unittest.TestCase):
         too_short = dict(
             VALID_RESPONSE,
             effect=(
-                "Wide panoramic abstract light texture with pale yellow above, "
-                "warm peach below, a vertical gradient, diffused bloom, evenly "
-                "bright illumination, and a calm welcoming atmosphere."
+                "Wide panoramic field with red left and blue right, smooth horizontal "
+                "gradient, uniform vertical color, uninterrupted surface."
             ),
         )
         client = FakeClient([too_short])
         result = LightingPromptAgent(client).generate("酒店大堂，晨雾天光")
 
         words = re.findall(r"[A-Za-z]+(?:[-'][A-Za-z]+)*", result.effect)
-        self.assertEqual(len(words), 30)
+        self.assertEqual(len(words), 20)
         self.assertEqual(len(client.calls), 1)
 
     def test_density_is_deterministic_for_arbitrary_space_size(self):
@@ -428,7 +464,7 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(len(client.calls), 2)
         self.assertIn("duplicates a prompt", client.calls[1][-1]["content"])
 
-    def test_retries_when_repair_rephrases_the_same_ordered_color_design(self):
+    def test_same_ordered_color_design_is_allowed_when_the_model_still_prefers_it(self):
         rephrased_same_design = dict(
             VALID_RESPONSE,
             effect=(
@@ -438,50 +474,31 @@ class AgentTests(unittest.TestCase):
                 "gentle identity, and an uninterrupted surface throughout."
             ),
         )
-        corrected = dict(
-            VALID_RESPONSE,
-            effect=(
-                "Wide panoramic organizer-style color field with light peach on the left "
-                "and dominant soft orange across the center and right, forming a clean "
-                "smooth horizontal gradient with uniform vertical color, warm illumination, "
-                "quiet hospitality, and an uninterrupted surface throughout."
-            ),
-        )
-        client = FakeClient([rephrased_same_design, corrected])
+        client = FakeClient([rephrased_same_design])
         result = LightingPromptAgent(client, validation_retries=1).generate(
             "酒店套房客厅，休闲氛围",
             forbidden_design_effects=[VALID_RESPONSE["effect"]],
         )
 
-        self.assertEqual(result.effect, corrected["effect"])
-        self.assertEqual(len(client.calls), 2)
-        self.assertIn("same ordered color design", client.calls[1][-1]["content"])
+        self.assertEqual(result.effect, rephrased_same_design["effect"])
+        self.assertEqual(len(client.calls), 1)
 
-    def test_clear_blue_sky_retries_when_model_adds_warm_color(self):
-        invalid = dict(
+    def test_agent_does_not_override_the_models_scene_palette(self):
+        model_choice = dict(
             VALID_RESPONSE,
             effect=(
-                "Wide panoramic abstract light texture with light blue across the upper "
-                "area, ivory cloud-like diffusion near the center, pale yellow across "
-                "the lower area, a broad vertical gradient, misty glow, diffused bloom, "
-                "evenly bright clean illumination, and an open airy atmosphere."
+                "Wide panoramic organizer-style color field with pale yellow on the left "
+                "and dominant warm orange across the center and right, forming a clean "
+                "smooth horizontal gradient with uniform vertical color, clear illumination, "
+                "open atmosphere, and an uninterrupted surface throughout."
             ),
         )
-        corrected = dict(
-            VALID_RESPONSE,
-            effect=(
-                "Wide panoramic abstract light texture with sky blue broadly across the "
-                "panel, soft ivory cloud-like diffusion near the upper center, a continuous "
-                "vertical fade, misty glow, diffused bloom, evenly bright clean illumination, "
-                "and an open airy atmosphere without literal objects."
-            ),
-        )
-        client = FakeClient([invalid, corrected])
+        client = FakeClient([model_choice])
         result = LightingPromptAgent(client, validation_retries=1).generate(
             "湛蓝的天空飘着洁白的云朵"
         )
-        self.assertIn("sky blue", result.effect)
-        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(result.effect, model_choice["effect"])
+        self.assertEqual(len(client.calls), 1)
 
 
 if __name__ == "__main__":

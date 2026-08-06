@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import asdict
 from contextlib import contextmanager
+import colorsys
 from datetime import datetime
 import hashlib
 import json
@@ -31,10 +32,7 @@ from modules.module_01_prompt_agent.src.client import (
     ModelClientError,
     ModelConfigurationError,
 )
-from modules.module_01_prompt_agent.src.fast_compiler import (
-    FastPromptCompiler,
-    has_explicit_color_cue,
-)
+from modules.module_01_prompt_agent.src.fast_compiler import FastPromptCompiler
 from modules.module_01_prompt_agent.src.schemas import (
     LightingEffectAttributes,
     LightingEffectValidationError,
@@ -44,8 +42,8 @@ from modules.module_03_image_generation.src.config import (
     GenerationConfig,
 )
 from modules.module_03_image_generation.src.concept_palette import (
-    build_concept_palette_plan,
-    harmonize_concept_image,
+    build_extracted_concept_palette_plan,
+    compile_light_effect_prompt,
     render_shared_palette_gradient,
 )
 from modules.module_03_image_generation.src.generator import (
@@ -61,6 +59,7 @@ from modules.module_03_image_generation.src.model_loader import (
 from modules.module_03_image_generation.src.quality import analyze_image_quality
 from modules.module_03_image_generation.src.structured_gradient import (
     StructuredGradientPlan,
+    build_structured_gradient_plan,
 )
 from modules.module_04_gamut_mapping.src.mapper import GamutMapper
 from modules.module_04_gamut_mapping.src.sdl_palette import (
@@ -76,6 +75,8 @@ SIMILARITY_DIFFERENCE_THRESHOLD = 0.03
 SIMILARITY_RETRY_SEED_OFFSET = 104729
 SDL_RETRY_SEED_OFFSET = 32452843
 MAX_SDL_RETRIES = 1
+CONCEPT_EFFECT_COLOR_MISMATCH_THRESHOLD = 0.55
+MINIMUM_CONCEPT_CHROMA_FOR_CORRECTION = 0.20
 
 
 def _sha256_file(path: Path) -> str:
@@ -135,6 +136,55 @@ def image_mean_absolute_difference(
         dtype=np.float32,
     )
     return float(np.mean(np.abs(first_array - second_array)) / 255.0)
+
+
+def _dominant_plan_rgb(plan: StructuredGradientPlan) -> tuple[int, int, int]:
+    primary = next((stop for stop in plan.stops if stop.role == "primary"), None)
+    if primary is not None:
+        return primary.rgb
+    named = next(
+        (stop for stop in plan.stops if stop.color_name == plan.dominant_color),
+        None,
+    )
+    return (named or plan.stops[len(plan.stops) // 2]).rgb
+
+
+def concept_effect_color_difference(
+    concept_plan: StructuredGradientPlan,
+    effect_plan: StructuredGradientPlan,
+    *,
+    threshold: float = CONCEPT_EFFECT_COLOR_MISMATCH_THRESHOLD,
+) -> dict[str, object]:
+    """Decide whether two independently designed palettes are severely mismatched."""
+
+    concept_rgb = _dominant_plan_rgb(concept_plan)
+    effect_rgb = _dominant_plan_rgb(effect_plan)
+    concept_hsv = colorsys.rgb_to_hsv(*(value / 255.0 for value in concept_rgb))
+    effect_hsv = colorsys.rgb_to_hsv(*(value / 255.0 for value in effect_rgb))
+    hue_delta = abs(concept_hsv[0] - effect_hsv[0])
+    hue_delta = min(hue_delta, 1.0 - hue_delta)
+    shared_chroma = min(concept_hsv[1], effect_hsv[1])
+    distance = float(
+        math.sqrt(
+            (2.4 * shared_chroma * hue_delta) ** 2
+            + (0.55 * (concept_hsv[1] - effect_hsv[1])) ** 2
+            + (0.25 * (concept_hsv[2] - effect_hsv[2])) ** 2
+        )
+    )
+    comparison_eligible = concept_hsv[1] >= MINIMUM_CONCEPT_CHROMA_FOR_CORRECTION
+    correction_required = comparison_eligible and distance >= threshold
+    return {
+        "method": "dominant_hsv_severe_mismatch_gate",
+        "concept_dominant_rgb": list(concept_rgb),
+        "effect_dominant_rgb": list(effect_rgb),
+        "concept_saturation": float(concept_hsv[1]),
+        "effect_saturation": float(effect_hsv[1]),
+        "dominant_hue_delta_degrees": float(hue_delta * 360.0),
+        "distance": distance,
+        "threshold": float(threshold),
+        "comparison_eligible": bool(comparison_eligible),
+        "correction_required": bool(correction_required),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,7 +333,7 @@ class LightingDemoPipeline:
         pattern_generator: Any | None = None,
         fast_prompt_compiler: Any | None = None,
         auto_palette_agent_factory: Callable[[], Any] | None = None,
-        auto_palette_timeout_seconds: float = 2.0,
+        auto_palette_timeout_seconds: float = 3.0,
         lora_scale: float = 0.8,
         allow_missing_sdl: bool = True,
         fast_mode: bool = False,
@@ -369,7 +419,7 @@ class LightingDemoPipeline:
                     "lora_sha256": _sha256_file(self.lora_path),
                     "device": self.device,
                     "module_01_attributes": source_attributes,
-                    "generation_mode": "concept_palette_fast",
+                    "generation_mode": "independent_dual_chain_fast",
                     "prompt_color_guidance": color_guidance,
                     "artifact_cleanup": {"applied": False},
                     "quality_status": "accepted",
@@ -427,20 +477,6 @@ class LightingDemoPipeline:
         forbidden_effects: Sequence[str],
         forbidden_design_effects: Sequence[str],
     ) -> tuple[LightingEffectAttributes, str, dict[str, Any]]:
-        if has_explicit_color_cue(scene):
-            attributes = self.fast_prompt_compiler.generate(
-                scene,
-                hardware_width_mm=hardware_width_mm,
-                hardware_height_mm=hardware_height_mm,
-                space_size_m2=space_size_m2,
-                forbidden_effects=forbidden_effects,
-                forbidden_design_effects=forbidden_design_effects,
-            )
-            return attributes, "local_explicit_colors", {
-                "attempted": False,
-                "reason": "explicit_user_colors",
-            }
-
         cache_key = (
             " ".join(scene.casefold().split()),
             hardware_width_mm,
@@ -449,7 +485,7 @@ class LightingDemoPipeline:
         )
         cached = self._auto_palette_cache.get(cache_key)
         if cached is not None:
-            return cached, "deepseek_auto_palette_cache", {
+            return cached, "deepseek_concept_prompt_cache", {
                 "attempted": False,
                 "reason": "cache_hit",
             }
@@ -464,9 +500,9 @@ class LightingDemoPipeline:
                 forbidden_design_effects=forbidden_design_effects,
             )
             self._auto_palette_cache[cache_key] = attributes
-            return attributes, "deepseek_auto_palette", {
+            return attributes, "deepseek_concept_prompt", {
                 "attempted": True,
-                "reason": "model_selected_palette",
+                "reason": "model_generated_natural_concept_prompt",
             }
         except ModelConfigurationError:
             fallback_reason = "missing_api_key"
@@ -483,7 +519,7 @@ class LightingDemoPipeline:
             forbidden_effects=forbidden_effects,
             forbidden_design_effects=forbidden_design_effects,
         )
-        return attributes, "local_semantic_palette_fallback", {
+        return attributes, "local_concept_prompt_fallback", {
             "attempted": True,
             "reason": fallback_reason,
         }
@@ -709,19 +745,89 @@ class LightingDemoPipeline:
                 with Image.open(concept.image_path) as opened:
                     source_concept_image = opened.convert("RGB").copy()
                 stage_started = time.perf_counter()
-                shared_plan, palette_report = build_concept_palette_plan(
-                    source_concept_image,
+                model_effect_draft = attributes.effect
+                independent_effect_plan = build_structured_gradient_plan(
                     attributes.effect,
-                )
-                concept_image, harmonization_report = harmonize_concept_image(
                     source_concept_image,
-                    shared_plan,
+                )
+                concept_palette_plan, concept_palette_report = (
+                    build_extracted_concept_palette_plan(source_concept_image)
+                )
+                color_comparison = concept_effect_color_difference(
+                    concept_palette_plan,
+                    independent_effect_plan,
+                )
+                if prompt_override is not None:
+                    color_comparison.update(
+                        {
+                            "comparison_eligible": False,
+                            "correction_required": False,
+                            "reason": "user_edited_effect_prompt_is_authoritative",
+                        }
+                    )
+                correction_applied = bool(
+                    color_comparison["correction_required"]
+                )
+                if correction_applied:
+                    shared_plan = concept_palette_plan
+                    effect_prompt = compile_light_effect_prompt(shared_plan)
+                    attributes = LightingEffectAttributes.from_mapping(
+                        {
+                            "density": attributes.density,
+                            "m_intensity": attributes.m_intensity,
+                            "k_intensity": attributes.k_intensity,
+                            "a_intensity": attributes.a_intensity,
+                            "effect": effect_prompt,
+                            "concept_prompt": attributes.concept_prompt,
+                        }
+                    )
+                    attributes_dict = attributes.to_dict()
+                    prompt_json_path.write_text(
+                        json.dumps(attributes_dict, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    palette_report = dict(concept_palette_report)
+                    palette_report["palette_source"] = (
+                        "concept_image_fallback_large_color_mismatch"
+                    )
+                else:
+                    shared_plan = independent_effect_plan
+                    effect_prompt = attributes.effect
+                    unique_colors: list[list[int]] = []
+                    for stop in shared_plan.stops:
+                        rgb = list(stop.rgb)
+                        if rgb not in unique_colors:
+                            unique_colors.append(rgb)
+                    palette_report = {
+                        "palette_source": (
+                            "user_edited_effect_prompt"
+                            if prompt_override is not None
+                            else "module_01_independent_effect_prompt"
+                        ),
+                        "requested_prompt_colors": [],
+                        "requested_color_weight": 1.0,
+                        "final_colors": unique_colors,
+                        "plan": shared_plan.to_dict(),
+                    }
+                palette_report.update(
+                    {
+                        "independent_chains": True,
+                        "correction_applied": correction_applied,
+                        "model_effect_draft": model_effect_draft,
+                        "compiled_effect_prompt": effect_prompt,
+                        "color_comparison": color_comparison,
+                        "independent_effect_plan": independent_effect_plan.to_dict(),
+                        "concept_palette_reference": concept_palette_report,
+                    }
                 )
                 concept_source_image_path = concept.image_path
-                concept_image_path = run_dir / (
-                    f"concept_image_harmonized_seed_{effective_seed}.png"
-                )
-                concept_image.save(concept_image_path, format="PNG", optimize=False)
+                concept_image_path = concept.image_path
+                harmonization_report = {
+                    "applied": False,
+                    "method": "none_independent_concept_chain",
+                    "strength": 0.0,
+                    "reason": "preserve_natural_scene_colors",
+                }
                 concept_manifest_path = concept.manifest_path
                 concept_details = json.loads(
                     concept_manifest_path.read_text(encoding="utf-8")
@@ -731,6 +837,7 @@ class LightingDemoPipeline:
                         "source_image_path": str(concept_source_image_path),
                         "display_image_path": str(concept_image_path),
                         "shared_palette": palette_report,
+                        "light_effect_color_decision": palette_report,
                         "harmonization": harmonization_report,
                     }
                 )
@@ -738,10 +845,10 @@ class LightingDemoPipeline:
                     json.dumps(concept_details, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8",
                 )
-                timings["concept_harmonization_seconds"] = (
+                timings["palette_extraction_seconds"] = (
                     time.perf_counter() - stage_started
                 )
-                self._notify(progress, 0.56, "正在复用共享色彩蓝图生成光色图")
+                self._notify(progress, 0.56, "正在按独立光效提示词生成并检查颜色差异")
                 stage_started = time.perf_counter()
                 generation = self._generate_fast_light(
                     scene=scene,

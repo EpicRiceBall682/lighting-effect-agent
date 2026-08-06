@@ -107,6 +107,31 @@ class PatternRendererTests(unittest.TestCase):
             "chromaticity_preserving_linear_rgb_gain",
         )
 
+    def test_gradient_receives_visible_asymmetric_low_frequency_flow(self):
+        x = np.linspace(0.0, 1.0, 320, dtype=np.float32)
+        line = np.stack(
+            (
+                50 + 150 * x,
+                90 + 80 * x,
+                210 - 120 * x,
+            ),
+            axis=1,
+        )
+        base = Image.fromarray(
+            np.rint(np.repeat(line[None, :, :], 96, axis=0)).astype(np.uint8),
+            mode="RGB",
+        )
+        rendered, report = render_pattern(
+            base,
+            extract_theme("动态品牌流动光", MODULE_01, pattern_strength=0.12),
+            seed=42,
+        )
+        pixels = np.asarray(rendered, dtype=np.float32)
+
+        self.assertGreater(report["maximum_horizontal_shift_px"], 1.0)
+        self.assertGreater(report["maximum_gain_deviation"], 0.04)
+        self.assertGreater(float(np.mean(np.abs(pixels[12] - pixels[82]))), 0.5)
+
     def test_brightening_does_not_clip_one_channel_and_shift_hue(self):
         from modules.module_04_gamut_mapping.src.color_spaces import rgb8_to_xyy
 

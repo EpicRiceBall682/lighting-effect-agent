@@ -33,6 +33,8 @@ class BrightnessPolicy:
     target_p10_luminance: float
     maximum_chromaticity_gain: float
     maximum_white_mix: float
+    minimum_mean_channel_peak: float
+    minimum_p10_channel_peak: float
 
 
 STANDARD_BRIGHTNESS_POLICY = BrightnessPolicy(
@@ -41,6 +43,8 @@ STANDARD_BRIGHTNESS_POLICY = BrightnessPolicy(
     target_p10_luminance=0.18,
     maximum_chromaticity_gain=1.35,
     maximum_white_mix=0.22,
+    minimum_mean_channel_peak=0.70,
+    minimum_p10_channel_peak=0.48,
 )
 ENERGETIC_BRIGHTNESS_POLICY = BrightnessPolicy(
     mode="energetic",
@@ -48,6 +52,8 @@ ENERGETIC_BRIGHTNESS_POLICY = BrightnessPolicy(
     target_p10_luminance=0.20,
     maximum_chromaticity_gain=1.35,
     maximum_white_mix=0.24,
+    minimum_mean_channel_peak=0.74,
+    minimum_p10_channel_peak=0.52,
 )
 DARK_BRIGHTNESS_POLICY = BrightnessPolicy(
     mode="intentional_dark",
@@ -55,6 +61,8 @@ DARK_BRIGHTNESS_POLICY = BrightnessPolicy(
     target_p10_luminance=0.10,
     maximum_chromaticity_gain=1.35,
     maximum_white_mix=0.12,
+    minimum_mean_channel_peak=0.48,
+    minimum_p10_channel_peak=0.28,
 )
 
 _DARK_SCENE_CUES = (
@@ -119,13 +127,15 @@ def scene_brightness_policy(scene: str) -> BrightnessPolicy:
 
 
 def _luminance_summary(image: Image.Image) -> dict[str, float]:
-    luminance = relative_luminance_rgb8(
-        np.asarray(image.convert("RGB"), dtype=np.float32)
-    )
+    rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
+    luminance = relative_luminance_rgb8(rgb)
+    channel_peak = np.max(rgb / 255.0, axis=2)
     return {
         "mean_luminance": float(luminance.mean()),
         "p10_luminance": float(np.quantile(luminance, 0.10)),
         "below_0_20_fraction": float(np.mean(luminance < 0.20)),
+        "mean_channel_peak": float(channel_peak.mean()),
+        "p10_channel_peak": float(np.quantile(channel_peak, 0.10)),
     }
 
 
@@ -138,10 +148,18 @@ def apply_scene_brightness_floor(
     source = image.convert("RGB")
     policy = scene_brightness_policy(scene)
     before = _luminance_summary(source)
-    needs_lift = (
+    low_luminance = (
         before["mean_luminance"] < policy.target_mean_luminance
         or before["p10_luminance"] < policy.target_p10_luminance
     )
+    low_channel_energy = (
+        before["mean_channel_peak"] < policy.minimum_mean_channel_peak
+        or before["p10_channel_peak"] < policy.minimum_p10_channel_peak
+    )
+    # Relative luminance assigns very different weights to red, green, and blue.
+    # Requiring both low luminance and low channel energy prevents saturated red or
+    # blue from being whitened merely because of its hue.
+    needs_lift = low_luminance and low_channel_energy
     if not needs_lift:
         return source, {
             "applied": False,
@@ -177,7 +195,15 @@ def apply_scene_brightness_floor(
         (policy.target_p10_luminance - after_gain["p10_luminance"])
         / max(1.0 - after_gain["p10_luminance"], 1e-6),
     )
-    white_mix = min(max(mean_mix, p10_mix), policy.maximum_white_mix)
+    still_low_channel_energy = (
+        after_gain["mean_channel_peak"] < policy.minimum_mean_channel_peak
+        or after_gain["p10_channel_peak"] < policy.minimum_p10_channel_peak
+    )
+    white_mix = (
+        min(max(mean_mix, p10_mix), policy.maximum_white_mix)
+        if still_low_channel_energy
+        else 0.0
+    )
     if white_mix > 0.0:
         result_rgb = blend_with_white_linear(gained_rgb, white_mix)
         result = Image.fromarray(result_rgb, mode="RGB")
@@ -338,12 +364,10 @@ def build_structured_gradient_plan(
     dominant_item = next((item for item in unique_mentions if item[2]), None)
     if len(unique_mentions) == 1:
         name, rgb, _dominant = unique_mentions[0]
-        pale = tuple(int(round(value * 0.82 + 255 * 0.18)) for value in rgb)
         return StructuredGradientPlan(
             direction="horizontal",
             stops=(
-                GradientStop(0.0, pale, f"lightened {name}", "secondary"),
-                GradientStop(0.42, rgb, name, "primary"),
+                GradientStop(0.0, rgb, name, "primary"),
                 GradientStop(1.0, rgb, name, "primary"),
             ),
             dominant_color=name,

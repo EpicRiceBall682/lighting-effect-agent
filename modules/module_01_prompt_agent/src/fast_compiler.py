@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import re
 
 from .agent import density_for_space_size
@@ -20,6 +21,9 @@ COLOR_CUES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("紫", "purple", "lavender"), "vivid purple"),
     (("白", "white"), "soft white"),
     (("靛", "indigo"), "indigo"),
+    (("琥珀", "amber"), "amber"),
+    (("品红", "洋红", "magenta"), "vivid magenta"),
+    (("海军蓝", "navy"), "deep navy"),
 )
 
 EXPLICIT_CHINESE_COLOR_CUES = (
@@ -34,6 +38,10 @@ EXPLICIT_CHINESE_COLOR_CUES = (
     "紫",
     "白",
     "靛",
+    "琥珀",
+    "品红",
+    "洋红",
+    "海军蓝",
 )
 EXPLICIT_ENGLISH_COLOR_PATTERN = re.compile(
     r"\b(?:pink|red|orange|yellow|gold|green|cyan|teal|turquoise|blue|purple|"
@@ -41,11 +49,26 @@ EXPLICIT_ENGLISH_COLOR_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_NON_COLOR_PHRASES = (
+    "黄昏",
+    "黄金时段",
+    "golden hour",
+)
+
+
+def _color_detection_text(scene: str) -> str:
+    """Remove phrases whose color characters describe time rather than hue."""
+
+    normalized = str(scene).casefold()
+    for phrase in _NON_COLOR_PHRASES:
+        normalized = normalized.replace(phrase, "")
+    return normalized
+
 
 def has_explicit_color_cue(scene: str) -> bool:
     """Return whether the user stated a color rather than only a mood or style."""
 
-    text = str(scene)
+    text = _color_detection_text(scene)
     return any(cue in text for cue in EXPLICIT_CHINESE_COLOR_CUES) or bool(
         EXPLICIT_ENGLISH_COLOR_PATTERN.search(text)
     )
@@ -59,6 +82,121 @@ class StyleSpec:
     intensities: tuple[int, int, int]
     default_subject: str
     composition: str
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticPaletteSpec:
+    cues: tuple[str, ...]
+    colors: tuple[str, ...]
+
+
+SEMANTIC_PALETTE_SPECS: tuple[SemanticPaletteSpec, ...] = (
+    SemanticPaletteSpec(
+        ("晨雾", "薄雾", "morning mist"),
+        ("soft white", "pale blue", "pale cyan"),
+    ),
+    SemanticPaletteSpec(
+        ("日出", "晨曦", "朝霞", "sunrise"),
+        ("deep navy", "warm peach", "bright yellow"),
+    ),
+    SemanticPaletteSpec(
+        ("黄昏", "夕阳", "日落", "晚霞", "sunset", "golden hour"),
+        ("warm orange", "soft pink", "vivid purple"),
+    ),
+    SemanticPaletteSpec(
+        ("水波", "泳池", "清凉", "波光", "water ripple", "pool"),
+        ("deep navy", "bright cyan", "light blue"),
+    ),
+    SemanticPaletteSpec(
+        ("霓虹", "neon"),
+        ("electric purple", "vivid magenta", "bright cyan"),
+    ),
+    SemanticPaletteSpec(
+        ("涂鸦", "graffiti"),
+        ("bright blue", "vivid magenta", "bright yellow", "bright green"),
+    ),
+    SemanticPaletteSpec(
+        ("火焰", "沸腾", "烟火气", "flame", "boiling"),
+        ("warm red", "bright orange", "bright yellow"),
+    ),
+    SemanticPaletteSpec(
+        ("微光", "隐约", "神秘", "low light", "mysterious"),
+        ("deep navy", "vivid purple", "amber"),
+    ),
+    SemanticPaletteSpec(
+        ("地中海", "mediterranean"),
+        ("bright blue", "light cyan", "soft white", "warm yellow"),
+    ),
+    SemanticPaletteSpec(
+        ("花瓣", "晨露", "香气", "petal", "dew"),
+        ("soft pink", "pale blue", "light purple"),
+    ),
+    SemanticPaletteSpec(
+        ("魔法镜", "magic mirror"),
+        ("indigo", "vivid purple", "soft pink"),
+    ),
+    SemanticPaletteSpec(
+        ("品牌", "图腾", "brand", "totem"),
+        ("bright blue", "vivid magenta", "warm orange"),
+    ),
+    SemanticPaletteSpec(
+        ("季节", "seasonal"),
+        ("soft purple", "pale blue", "warm peach"),
+    ),
+    SemanticPaletteSpec(
+        ("自然光", "真实肤色", "daylight", "skin tone"),
+        ("soft white", "pale blue", "light peach"),
+    ),
+    SemanticPaletteSpec(
+        ("新鲜", "食欲", "fresh food", "appetite"),
+        ("bright green", "bright yellow", "bright orange"),
+    ),
+    SemanticPaletteSpec(
+        ("动态", "互动", "节奏", "流动", "dynamic", "interactive", "rhythm"),
+        ("bright cyan", "bright blue", "vivid magenta"),
+    ),
+)
+
+
+SCENE_PALETTE_VARIANTS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "hotel": (
+        ("soft white", "pale blue", "light cyan"),
+        ("light peach", "warm yellow", "soft pink"),
+        ("pale cyan", "soft purple", "warm peach"),
+    ),
+    "restaurant_bar": (
+        ("amber", "warm orange", "soft pink"),
+        ("warm peach", "pale golden yellow", "light purple"),
+        ("deep navy", "vivid purple", "amber"),
+    ),
+    "cafe": (
+        ("warm peach", "amber", "pale golden yellow"),
+        ("pale green", "light cyan", "soft yellow"),
+        ("soft pink", "warm peach", "light purple"),
+    ),
+    "retail": (
+        ("bright blue", "vivid magenta", "light cyan"),
+        ("soft pink", "bright yellow", "pale blue"),
+        ("bright cyan", "vivid purple", "warm orange"),
+    ),
+    "bedroom": (
+        ("pale blue", "soft purple", "soft pink"),
+        ("warm peach", "pale golden yellow", "soft white"),
+    ),
+    "sports": (
+        ("bright cyan", "bright blue", "bright green"),
+        ("bright orange", "bright yellow", "vivid magenta"),
+    ),
+}
+
+DEFAULT_PALETTE_VARIANTS: tuple[tuple[str, ...], ...] = (
+    ("pale blue", "light cyan", "soft white"),
+    ("warm peach", "soft pink", "pale golden yellow"),
+    ("pale green", "soft yellow", "light blue"),
+    ("soft purple", "pale blue", "warm peach"),
+    ("bright cyan", "bright blue", "vivid purple"),
+    ("amber", "warm orange", "soft pink"),
+)
 
 
 STYLE_SPECS: tuple[StyleSpec, ...] = (
@@ -316,7 +454,7 @@ DEFAULT_SCENE_SPEC = SceneSpec(
 
 @dataclass(frozen=True, slots=True)
 class FastPromptCompiler:
-    """Produce shared concept and gradient controls without a network request."""
+    """Produce independent concept and gradient prompts without a network request."""
 
     def generate(
         self,
@@ -331,9 +469,13 @@ class FastPromptCompiler:
         if len(scene) < 2:
             raise ValueError("scene_description must contain at least two characters")
 
-        style_spec = self._style_spec(scene)
-        colors = self._ordered_colors(scene, style_spec=style_spec)
         scene_spec = self._scene_spec(scene)
+        style_spec = self._style_spec(scene)
+        colors = self._ordered_colors(
+            scene,
+            style_spec=style_spec,
+            scene_spec=scene_spec,
+        )
         mood, intensities = self._mood(scene, style_spec=style_spec)
         subject = scene_spec.subject
         composition = scene_spec.composition
@@ -346,10 +488,10 @@ class FastPromptCompiler:
             else "middle"
         )
         effect = self._effect(colors, mood)
-        color_placement = self._color_placement(colors)
         concept_prompt = (
-            f"Cinematic view of {subject}. {composition}. Lighting: "
-            f"{color_placement}. {mood} atmosphere, realistic detail and depth."
+            f"Cinematic view of {subject}. {composition}. Natural, physically plausible "
+            f"scene lighting with a {mood} atmosphere, realistic material colors, detail, "
+            "and depth without a uniform color wash."
         )
         return LightingEffectAttributes.from_mapping(
             {
@@ -367,38 +509,64 @@ class FastPromptCompiler:
         scene: str,
         *,
         style_spec: StyleSpec | None = None,
+        scene_spec: SceneSpec | None = None,
     ) -> tuple[str, ...]:
         lowered = scene.casefold()
-        located: list[tuple[int, str]] = []
+        color_text = _color_detection_text(scene)
+        located: list[tuple[int, int, str]] = []
         for cues, color in COLOR_CUES:
-            positions = [lowered.find(cue.casefold()) for cue in cues]
-            positions = [position for position in positions if position >= 0]
-            if positions:
-                located.append((min(positions), color))
+            matches = [
+                (color_text.find(cue.casefold()), len(cue))
+                for cue in cues
+                if color_text.find(cue.casefold()) >= 0
+            ]
+            if matches:
+                position, length = min(matches, key=lambda item: item[0])
+                located.append((position, position + length, color))
+        selected_spans: list[tuple[int, int]] = []
         ordered = []
-        for _position, color in sorted(located):
+        for start, end, color in sorted(
+            located,
+            key=lambda item: (item[0], -(item[1] - item[0])),
+        ):
+            if any(
+                start < used_end and end > used_start
+                for used_start, used_end in selected_spans
+            ):
+                continue
+            selected_spans.append((start, end))
             if color not in ordered:
                 ordered.append(color)
         if not ordered:
-            if style_spec is not None:
+            semantic = next(
+                (
+                    spec.colors
+                    for spec in SEMANTIC_PALETTE_SPECS
+                    if any(cue.casefold() in lowered for cue in spec.cues)
+                ),
+                None,
+            )
+            if semantic is not None:
+                ordered = list(semantic)
+            elif style_spec is not None:
                 ordered = list(style_spec.colors)
-            elif any(cue in lowered for cue in ("清新", "自然", "fresh", "nature")):
-                ordered = ["pale yellow", "bright green", "light blue"]
-            elif any(cue in lowered for cue in ("浪漫", "romantic")):
-                ordered = ["soft pink", "vivid purple"]
-            elif any(cue in lowered for cue in ("活力", "运动", "energetic")):
-                ordered = ["bright orange", "bright cyan"]
             else:
-                ordered = ["light peach", "warm yellow"]
-        elif len(ordered) == 1:
-            companion = {
-                "bright green": "light blue",
-                "bright cyan": "soft pink",
-                "bright blue": "soft white",
-                "soft pink": "pale yellow",
-                "warm red": "bright orange",
-            }.get(ordered[0], "soft white")
-            ordered.insert(0, companion)
+                if any(
+                    cue in lowered for cue in ("清新", "自然", "fresh", "nature")
+                ):
+                    ordered = ["pale yellow", "bright green", "light blue"]
+                elif any(cue in lowered for cue in ("浪漫", "romantic")):
+                    ordered = ["soft pink", "vivid purple"]
+                elif any(cue in lowered for cue in ("活力", "运动", "energetic")):
+                    ordered = ["bright orange", "bright cyan"]
+                else:
+                    variants = SCENE_PALETTE_VARIANTS.get(
+                        scene_spec.name if scene_spec is not None else "",
+                        DEFAULT_PALETTE_VARIANTS,
+                    )
+                    digest = hashlib.sha256(scene.encode("utf-8")).digest()
+                    index = int.from_bytes(digest[:2], "big") % len(variants)
+                    ordered = list(variants[index])
         return tuple(ordered[:4])
 
     @staticmethod
@@ -430,20 +598,56 @@ class FastPromptCompiler:
         style_spec: StyleSpec | None = None,
     ) -> tuple[str, tuple[int, int, int]]:
         lowered = scene.casefold()
-        if any(cue in lowered for cue in ("活力", "运动", "热烈", "energetic")):
+        if any(
+            cue in lowered
+            for cue in (
+                "活力",
+                "运动",
+                "热烈",
+                "霓虹",
+                "动态",
+                "互动",
+                "节奏",
+                "energetic",
+                "neon",
+                "dynamic",
+            )
+        ):
             return "vivid energetic", (82, 90, 72)
         if any(cue in lowered for cue in ("浪漫", "温馨", "romantic", "cozy")):
             return "warm romantic", (68, 76, 64)
         if any(cue in lowered for cue in ("清新", "自然", "fresh", "nature")):
             return "fresh natural", (72, 78, 76)
-        if any(cue in lowered for cue in ("安静", "放松", "睡眠", "calm", "relax")):
+        if any(
+            cue in lowered
+            for cue in (
+                "暗调",
+                "微光",
+                "隐约",
+                "神秘",
+                "私密",
+                "安静",
+                "放松",
+                "睡眠",
+                "助眠",
+                "calm",
+                "relax",
+                "low light",
+            )
+        ):
             return "calm relaxing", (56, 62, 58)
+        if any(cue in lowered for cue in ("黄昏", "夕阳", "日落", "琥珀", "sunset")):
+            return "warm atmospheric", (64, 74, 60)
+        if any(cue in lowered for cue in ("正午", "日间明亮", "自然光", "daylight")):
+            return "bright natural", (78, 84, 76)
         if style_spec is not None:
             return style_spec.mood, style_spec.intensities
         return "balanced welcoming", (70, 76, 68)
 
     @staticmethod
     def _color_placement(colors: tuple[str, ...]) -> str:
+        if len(colors) == 1:
+            return f"dominant {colors[0]} across the entire panel"
         if len(colors) >= 4:
             return (
                 f"{colors[0]} on the left, {colors[1]} near the left center, "

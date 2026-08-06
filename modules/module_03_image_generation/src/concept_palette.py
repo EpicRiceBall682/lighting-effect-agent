@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import colorsys
 from dataclasses import asdict
+import re
 
 import numpy as np
 from PIL import Image
@@ -29,7 +31,9 @@ def _dominant_band_color(pixels: np.ndarray) -> tuple[int, int, int]:
         out=np.zeros_like(maximum),
         where=maximum > 1e-6,
     )
-    mask = (maximum >= 0.35) & (saturation >= 0.10)
+    # Prefer illuminated surfaces over dark furniture, beams, and window frames.
+    # Dark-scene fallback below still keeps a usable palette when no bright region exists.
+    mask = (maximum >= 0.50) & (saturation >= 0.08)
     candidates = flat[mask]
     candidate_weights = (0.25 + saturation[mask]) * maximum[mask]
     if len(candidates) < 16:
@@ -73,13 +77,146 @@ def extract_ordered_palette(
 
 
 def _nearest_color_name(rgb: tuple[int, int, int]) -> str:
-    target = np.asarray(rgb, dtype=np.float32)
+    target_hsv = colorsys.rgb_to_hsv(*(value / 255.0 for value in rgb))
+
+    def distance(item: tuple[str, tuple[int, int, int]]) -> float:
+        candidate_hsv = colorsys.rgb_to_hsv(
+            *(value / 255.0 for value in item[1])
+        )
+        hue_delta = abs(target_hsv[0] - candidate_hsv[0])
+        hue_delta = min(hue_delta, 1.0 - hue_delta)
+        hue_importance = max(target_hsv[1], candidate_hsv[1])
+        saturation_delta = target_hsv[1] - candidate_hsv[1]
+        value_delta = target_hsv[2] - candidate_hsv[2]
+        return (
+            (4.0 * hue_importance * hue_delta) ** 2
+            + (1.3 * saturation_delta) ** 2
+            + (0.8 * value_delta) ** 2
+        )
+
     return min(
         COLOR_RGB,
-        key=lambda item: float(
-            np.sum((np.asarray(item[1], dtype=np.float32) - target) ** 2)
-        ),
+        key=distance,
     )[0]
+
+
+def _merge_similar_adjacent_colors(
+    colors: tuple[tuple[int, int, int], ...],
+    *,
+    threshold: float = 30.0,
+) -> tuple[tuple[int, int, int], ...]:
+    """Merge neighboring scene colors that would create redundant gradient stops."""
+
+    merged: list[tuple[int, int, int]] = []
+    for color in colors:
+        if not merged:
+            merged.append(color)
+            continue
+        distance = float(
+            np.linalg.norm(
+                np.asarray(color, dtype=np.float32)
+                - np.asarray(merged[-1], dtype=np.float32)
+            )
+        )
+        if distance < threshold:
+            merged[-1] = tuple(
+                int(round((left + right) / 2.0))
+                for left, right in zip(merged[-1], color)
+            )
+        else:
+            merged.append(color)
+    return tuple(merged)
+
+
+def _palette_coverage(
+    concept_image: Image.Image,
+    colors: tuple[tuple[int, int, int], ...],
+) -> tuple[float, ...]:
+    """Estimate how much of the concept image is closest to each selected color."""
+
+    sample = np.asarray(
+        concept_image.convert("RGB").resize((128, 72), Image.Resampling.BILINEAR),
+        dtype=np.float32,
+    ).reshape(-1, 3)
+    palette = np.asarray(colors, dtype=np.float32)
+    distances = np.sum((sample[:, None, :] - palette[None, :, :]) ** 2, axis=2)
+    assignments = np.argmin(distances, axis=1)
+    counts = np.bincount(assignments, minlength=len(colors)).astype(np.float64)
+    weights = counts / max(float(counts.sum()), 1.0)
+    return tuple(float(value) for value in weights)
+
+
+def build_extracted_concept_palette_plan(
+    concept_image: Image.Image,
+    *,
+    color_count: int = 3,
+) -> tuple[StructuredGradientPlan, dict[str, object]]:
+    """Make the original concept image the sole source of the light-field palette."""
+
+    extracted = extract_ordered_palette(concept_image, color_count=color_count)
+    colors = _merge_similar_adjacent_colors(extracted)
+    coverage = _palette_coverage(concept_image, colors)
+    names = tuple(_nearest_color_name(color) for color in colors)
+    positions = np.linspace(0.0, 1.0, len(colors))
+    dominant_index = int(np.argmax(np.asarray(coverage, dtype=np.float32)))
+    stops = tuple(
+        GradientStop(
+            position=float(position),
+            rgb=color,
+            color_name=name,
+            role="primary" if index == dominant_index else "secondary",
+        )
+        for index, (position, color, name) in enumerate(
+            zip(positions, colors, names)
+        )
+    )
+    plan = StructuredGradientPlan(
+        direction="horizontal",
+        stops=stops,
+        dominant_color=stops[dominant_index].color_name,
+        source="concept_image_extracted_palette",
+    )
+    report: dict[str, object] = {
+        "palette_source": "original_concept_image_only",
+        "extracted_colors": [list(color) for color in extracted],
+        "merged_colors": [list(color) for color in colors],
+        "coverage": list(coverage),
+        "requested_prompt_colors": [],
+        "requested_color_weight": 0.0,
+        "final_colors": [list(color) for color in colors],
+        "plan": plan.to_dict(),
+    }
+    return plan, report
+
+
+def compile_light_effect_prompt(plan: StructuredGradientPlan) -> str:
+    """Describe an extracted RGB plan without making a new color decision."""
+
+    stops = plan.stops
+    if len(stops) == 1:
+        placement = f"dominant {stops[0].color_name} across the entire panel"
+    else:
+        labels = {
+            2: ("on the left", "across the center and right"),
+            3: ("on the left", "through the center", "on the right"),
+            4: (
+                "on the far left",
+                "near the left center",
+                "near the right center",
+                "on the far right",
+            ),
+        }[len(stops)]
+        parts = []
+        for stop, label in zip(stops, labels):
+            prefix = "dominant " if stop.role == "primary" else ""
+            parts.append(f"{prefix}{stop.color_name} {label}")
+        placement = ", ".join(parts[:-1]) + ", and " + parts[-1]
+    return (
+        f"Wide panoramic organizer-style color field with {placement}, derived from the "
+        "concept scene palette, forming a clean smooth horizontal gradient with uniform "
+        "vertical color, balanced illumination, natural color relationships, and an "
+        "uninterrupted luminous surface throughout."
+    )
 
 
 def build_concept_palette_plan(
@@ -88,25 +225,43 @@ def build_concept_palette_plan(
 ) -> tuple[StructuredGradientPlan, dict[str, object]]:
     """Build the shared color blueprint used by both concept and light images."""
 
+    matches = matched_color_spans(prompt)
+    modified_families = {
+        name.rsplit(" ", 1)[-1]
+        for _start, _end, name, _rgb in matches
+        if " " in name
+    }
     prompt_colors: list[tuple[str, tuple[int, int, int]]] = []
-    for _start, _end, name, rgb in matched_color_spans(prompt):
+    lowered = prompt.casefold()
+    for start, end, name, rgb in matches:
+        family = name.rsplit(" ", 1)[-1]
+        context = lowered[max(0, start - 16) : min(len(lowered), end + 28)]
+        has_spatial_role = bool(
+            re.search(
+                r"\b(?:left|right|center|centre|across|entire|dominant|dominated|"
+                r"primary|main)\b",
+                context,
+            )
+        )
+        if name == family and family in modified_families and not has_spatial_role:
+            continue
         if name not in {item[0] for item in prompt_colors}:
             prompt_colors.append((name, rgb))
-    color_count = min(4, max(2, len(prompt_colors) or 4))
-    extracted = extract_ordered_palette(concept_image, color_count=color_count)
+    extraction_count = min(4, max(2, len(prompt_colors) or 4))
+    extracted = extract_ordered_palette(concept_image, color_count=extraction_count)
 
-    final_colors = list(extracted)
-    final_names = [_nearest_color_name(color) for color in extracted]
     if prompt_colors:
-        prompt_positions = np.linspace(0, color_count - 1, len(prompt_colors))
-        for source_index, (name, rgb) in enumerate(prompt_colors):
-            target_index = int(round(float(prompt_positions[source_index])))
-            # Explicit user colors are the shared contract. The stochastic concept
-            # image is harmonized to this blueprint later instead of being allowed to
-            # silently replace a requested hue.
-            final_colors[target_index] = tuple(int(value) for value in rgb)
-            final_names[target_index] = name
+        # The model-selected prompt palette is the complete color decision. Do not
+        # fill unused slots with concept-image colors or invent a companion hue.
+        final_colors = [
+            tuple(int(value) for value in rgb) for _name, rgb in prompt_colors
+        ]
+        final_names = [name for name, _rgb in prompt_colors]
+    else:
+        final_colors = list(extracted)
+        final_names = [_nearest_color_name(color) for color in extracted]
 
+    color_count = len(final_colors)
     positions = np.linspace(0.0, 1.0, color_count)
     stops = tuple(
         GradientStop(
@@ -194,7 +349,7 @@ def render_shared_palette_gradient(
     height: int,
     scene: str = "",
 ) -> tuple[Image.Image, dict[str, object]]:
-    """Render a light field from the exact blueprint used to harmonize the concept."""
+    """Render a light field from the selected fast-path color blueprint."""
 
     base_image = render_base_gradient(plan, width=width, height=height)
     image, brightness_report = apply_scene_brightness_floor(base_image, scene)
@@ -202,7 +357,11 @@ def render_shared_palette_gradient(
     report.update(
         {
             "applied": True,
-            "render_mode": "shared_palette_fast_gradient",
+            "render_mode": (
+                "independent_effect_fast_gradient"
+                if palette_report.get("independent_chains")
+                else "shared_palette_fast_gradient"
+            ),
             "quality_status": "accepted",
             "brightness_floor": brightness_report,
             "final_metrics": structured_gradient_metrics(image),

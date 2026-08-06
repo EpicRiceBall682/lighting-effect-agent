@@ -538,29 +538,29 @@ class PipelineTests(SamplePaletteTestCase):
             )
             self.assertTrue(result.concept_image_path.is_file())
             self.assertTrue(result.sdl_preview_path.is_file())
-            self.assertIn("bright green", result.prompt)
+            self.assertNotIn("derived from the concept scene palette", result.prompt)
             self.assertTrue(result.deadline_met)
             self.assertLess(result.timings["total_seconds"], 6.0)
             report = json.loads(result.report_path.read_text(encoding="utf-8"))
-            self.assertNotEqual(
+            self.assertEqual(
                 report["concept_image"]["path"],
                 report["concept_image"]["source_path"],
             )
             concept_manifest = json.loads(
                 result.concept_manifest_path.read_text(encoding="utf-8")
             )
-            self.assertGreater(
-                concept_manifest["harmonization"][
-                    "chroma_error_reduction_fraction"
-                ],
-                0.75,
-            )
+            self.assertFalse(concept_manifest["harmonization"]["applied"])
             self.assertEqual(
-                report["module_03"]["prompt_color_guidance"]["final_colors"],
-                [[239, 177, 203], [255, 226, 70], [74, 214, 112], [72, 156, 235]],
+                report["module_03"]["prompt_color_guidance"]["palette_source"],
+                "module_01_independent_effect_prompt",
+            )
+            self.assertFalse(
+                report["module_03"]["prompt_color_guidance"][
+                    "correction_applied"
+                ]
             )
 
-    def test_fast_mode_uses_model_palette_when_no_color_is_explicit(self):
+    def test_fast_mode_uses_model_for_the_natural_concept_prompt(self):
         class AutoPaletteAgent:
             calls = 0
 
@@ -597,29 +597,57 @@ class PipelineTests(SamplePaletteTestCase):
             result = pipeline.run("赛博朋克", 1220, 370, seed=42, steps=4)
             report = json.loads(result.report_path.read_text(encoding="utf-8"))
 
-            self.assertEqual(result.prompt_source, "deepseek_auto_palette")
+            self.assertEqual(result.prompt_source, "deepseek_concept_prompt")
             self.assertEqual(agent.calls, 1)
             self.assertIn("electric purple", result.prompt)
+            self.assertNotIn("derived from the concept scene palette", result.prompt)
+            self.assertIn(
+                "futuristic neon city street",
+                result.attributes["concept_prompt"],
+            )
             self.assertEqual(
                 report["module_01_auto_palette"]["reason"],
-                "model_selected_palette",
+                "model_generated_natural_concept_prompt",
             )
 
-    def test_explicit_color_skips_model_palette(self):
+    def test_explicit_color_also_uses_model_palette_judgment(self):
+        class ExplicitColorAgent:
+            calls = 0
+
+            def generate(self, _scene, **_kwargs):
+                type(self).calls += 1
+                return LightingEffectAttributes(
+                    density="middle",
+                    m_intensity=78,
+                    k_intensity=84,
+                    a_intensity=70,
+                    effect=(
+                        "Wide panoramic color field with dominant bright green across the "
+                        "entire panel, forming a clean smooth horizontal gradient with "
+                        "uniform vertical color, balanced illumination, natural clarity, "
+                        "visual coherence, and an uninterrupted luminous surface throughout."
+                    ),
+                    concept_prompt=(
+                        "Cinematic forest clearing with layered trees and bright green "
+                        "natural light, realistic detail, depth, and an open composition."
+                    ),
+                )
+
         with tempfile.TemporaryDirectory() as directory:
+            agent = ExplicitColorAgent()
             pipeline = LightingDemoPipeline(
                 sdl_path=Path(directory) / "missing_sdl.txt",
                 output_root=Path(directory) / "outputs",
                 generator_factory=FakeGenerator,
                 fast_mode=True,
-                auto_palette_agent_factory=lambda: (_ for _ in ()).throw(
-                    AssertionError("auto palette model must not be constructed")
-                ),
+                auto_palette_agent_factory=lambda: agent,
             )
             result = pipeline.run("绿色森林", 1220, 370, seed=42, steps=4)
 
-            self.assertEqual(result.prompt_source, "local_explicit_colors")
-            self.assertIn("bright green", result.prompt)
+            self.assertEqual(result.prompt_source, "deepseek_concept_prompt")
+            self.assertEqual(agent.calls, 1)
+            self.assertIn("dominant bright green", result.prompt)
+            self.assertNotIn("derived from the concept scene palette", result.prompt)
 
     def test_failed_model_palette_uses_semantic_style_fallback(self):
         class FailingAgent:
@@ -637,13 +665,72 @@ class PipelineTests(SamplePaletteTestCase):
             result = pipeline.run("赛博朋克", 1220, 370, seed=42, steps=4)
             report = json.loads(result.report_path.read_text(encoding="utf-8"))
 
-            self.assertEqual(result.prompt_source, "local_semantic_palette_fallback")
+            self.assertEqual(result.prompt_source, "local_concept_prompt_fallback")
             self.assertIn("electric purple", result.prompt)
-            self.assertIn("bright cyan", result.prompt)
+            self.assertNotIn("derived from the concept scene palette", result.prompt)
+            self.assertIn("futuristic city", result.attributes["concept_prompt"])
             self.assertEqual(
                 report["module_01_auto_palette"]["reason"],
                 "unexpected_model_failure",
             )
+
+    def test_severe_independent_color_mismatch_uses_concept_palette_fallback(self):
+        class RedConceptGenerator(FakeGenerator):
+            def generate_concept(self, prompt, *, output_dir, seed, steps):
+                output_dir.mkdir(parents=True, exist_ok=True)
+                image_path = output_dir / f"concept_image_seed_{seed}.png"
+                manifest_path = output_dir / "concept_image.json"
+                Image.new("RGB", (512, 288), (240, 45, 35)).save(image_path)
+                manifest_path.write_text(
+                    json.dumps({"prompt": prompt, "steps": steps}) + "\n",
+                    encoding="utf-8",
+                )
+                return SimpleNamespace(
+                    image_path=image_path,
+                    manifest_path=manifest_path,
+                    seed=seed,
+                    steps=steps,
+                    inference_seconds=0.01,
+                )
+
+        class BlueEffectAgent:
+            def generate(self, _scene, **_kwargs):
+                return LightingEffectAttributes(
+                    density="middle",
+                    m_intensity=75,
+                    k_intensity=82,
+                    a_intensity=68,
+                    effect=(
+                        "Wide panoramic color field with dominant bright blue across the "
+                        "entire panel, forming a clean smooth horizontal gradient with "
+                        "uniform vertical color, balanced illumination, natural clarity, "
+                        "visual coherence, and an uninterrupted luminous surface throughout."
+                    ),
+                    concept_prompt=(
+                        "A vivid red exhibition space with realistic materials, people, "
+                        "architectural depth, and strongly saturated environmental light."
+                    ),
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LightingDemoPipeline(
+                sdl_path=Path(directory) / "missing_sdl.txt",
+                output_root=Path(directory) / "outputs",
+                generator_factory=RedConceptGenerator,
+                fast_mode=True,
+                auto_palette_agent_factory=BlueEffectAgent,
+            )
+            result = pipeline.run("强烈红色展览空间", 1220, 370, seed=42, steps=4)
+            report = json.loads(result.report_path.read_text(encoding="utf-8"))
+            guidance = report["module_03"]["prompt_color_guidance"]
+
+            self.assertTrue(guidance["correction_applied"])
+            self.assertTrue(guidance["color_comparison"]["correction_required"])
+            self.assertEqual(
+                guidance["palette_source"],
+                "concept_image_fallback_large_color_mismatch",
+            )
+            self.assertIn("derived from the concept scene palette", result.prompt)
 
 
 class AppTests(SamplePaletteTestCase):
@@ -688,7 +775,7 @@ class AppTests(SamplePaletteTestCase):
         )
         self.assertEqual(str(args.sdl_path), r"C:\private\SDL2_0.txt")
         self.assertTrue(args.require_sdl)
-        self.assertEqual(args.auto_palette_timeout_seconds, 2.0)
+        self.assertEqual(args.auto_palette_timeout_seconds, 3.0)
 
     def test_metrics_do_not_claim_sdl_compliance_in_preview_mode(self):
         metrics = _format_metrics(
